@@ -1,16 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { supabase } from "./supabase";
 
-const STORAGE_KEYS = {
-  users: "bet_tracker_users",
-};
-
-const defaultUsers = [
-  { id: "u1", name: "Mike", email: "mike@test.com", password: "123456" },
-  { id: "u2", name: "Mandy", email: "mandy@test.com", password: "123456" },
-  { id: "u3", name: "Steve", email: "steve@test.com", password: "123456" },
-];
-
 const filters = ["Day", "Month", "Year", "All Time"];
 
 function uid() {
@@ -45,19 +35,6 @@ function isInFilter(dateString, filter) {
   if (filter === "Year") return date.getFullYear() === now.getFullYear();
 
   return true;
-}
-
-function loadLocal(key, fallback) {
-  try {
-    const raw = localStorage.getItem(key);
-    return raw ? JSON.parse(raw) : fallback;
-  } catch {
-    return fallback;
-  }
-}
-
-function saveLocal(key, value) {
-  localStorage.setItem(key, JSON.stringify(value));
 }
 
 function getUserName(users, userId) {
@@ -351,17 +328,17 @@ function mapDbBetToUi(bet) {
 }
 
 export default function App() {
-  const [users, setUsers] = useState(() =>
-    loadLocal(STORAGE_KEYS.users, defaultUsers)
-  );
+  const [users, setUsers] = useState([]);
   const [bets, setBets] = useState([]);
   const [session, setSession] = useState(null);
+
   const [authLoading, setAuthLoading] = useState(true);
+  const [isLoadingBets, setIsLoadingBets] = useState(true);
+  const [isLoadingProfiles, setIsLoadingProfiles] = useState(true);
 
   const [page, setPage] = useState("home");
   const [menuOpen, setMenuOpen] = useState(false);
 
-  const [showAuthModal, setShowAuthModal] = useState(true);
   const [authMode, setAuthMode] = useState("login");
   const [authError, setAuthError] = useState("");
 
@@ -394,42 +371,36 @@ export default function App() {
 
   const [leaderboardFilter, setLeaderboardFilter] = useState("All Time");
   const [historyFilter, setHistoryFilter] = useState("All Time");
-  const [isLoadingBets, setIsLoadingBets] = useState(true);
-
   const [gradeWarnings, setGradeWarnings] = useState({});
 
   const authUser = session?.user || null;
 
   const currentUser = useMemo(() => {
-    if (authUser) {
-      const localMatch =
-        users.find((u) => u.id === authUser.id) ||
-        users.find((u) => u.email.toLowerCase() === (authUser.email || "").toLowerCase());
+    if (!authUser) return null;
 
-      return (
-        localMatch || {
-          id: authUser.id,
-          name:
-            authUser.user_metadata?.name ||
-            authUser.email?.split("@")[0] ||
-            "User",
-          email: authUser.email || "",
-        }
-      );
-    }
+    const match =
+      users.find((u) => u.id === authUser.id) ||
+      users.find((u) => u.email?.toLowerCase() === (authUser.email || "").toLowerCase());
 
-    return users[0] || { id: "guest", name: "Guest", email: "" };
+    return (
+      match || {
+        id: authUser.id,
+        name:
+          authUser.user_metadata?.name ||
+          authUser.email?.split("@")[0] ||
+          "User",
+        email: authUser.email || "",
+      }
+    );
   }, [authUser, users]);
 
   useEffect(() => {
-    saveLocal(STORAGE_KEYS.users, users);
-  }, [users]);
-
-  useEffect(() => {
     async function initAuth() {
-      const { data } = await supabase.auth.getSession();
-      setSession(data.session || null);
-      setShowAuthModal(!data.session);
+      const {
+        data: { session: existingSession },
+      } = await supabase.auth.getSession();
+
+      setSession(existingSession || null);
       setAuthLoading(false);
     }
 
@@ -439,7 +410,9 @@ export default function App() {
       data: { subscription },
     } = supabase.auth.onAuthStateChange((_event, nextSession) => {
       setSession(nextSession || null);
-      setShowAuthModal(!nextSession);
+      if (!nextSession) {
+        setShowCreateBetModal(false);
+      }
     });
 
     return () => subscription.unsubscribe();
@@ -451,8 +424,48 @@ export default function App() {
     return () => window.removeEventListener("click", handleClick);
   }, [menuOpen]);
 
+  async function loadProfiles() {
+    if (!authUser) {
+      setUsers([]);
+      setIsLoadingProfiles(false);
+      return;
+    }
+
+    setIsLoadingProfiles(true);
+
+    const { data, error } = await supabase
+      .from("profiles")
+      .select("id, email, name")
+      .order("name", { ascending: true });
+
+    if (!error && data) {
+      setUsers(data);
+    }
+
+    setIsLoadingProfiles(false);
+  }
+
+  async function ensureCurrentProfile(user) {
+    if (!user) return;
+
+    const profile = {
+      id: user.id,
+      email: user.email || "",
+      name:
+        user.user_metadata?.name ||
+        user.email?.split("@")[0] ||
+        "User",
+    };
+
+    await supabase.from("profiles").upsert(profile);
+  }
+
   async function loadBetsFromSupabase() {
-    if (!supabase) return;
+    if (!authUser) {
+      setBets([]);
+      setIsLoadingBets(false);
+      return;
+    }
 
     setIsLoadingBets(true);
 
@@ -469,46 +482,23 @@ export default function App() {
   }
 
   useEffect(() => {
-    loadBetsFromSupabase();
-  }, []);
-
-  useEffect(() => {
-    if (!authUser) return;
-
-    setUsers((prev) => {
-      const exists =
-        prev.some((u) => u.id === authUser.id) ||
-        prev.some((u) => u.email.toLowerCase() === (authUser.email || "").toLowerCase());
-
-      if (exists) {
-        return prev.map((u) => {
-          if (u.id === authUser.id || u.email.toLowerCase() === (authUser.email || "").toLowerCase()) {
-            return {
-              ...u,
-              id: authUser.id,
-              email: authUser.email || u.email,
-              name: authUser.user_metadata?.name || u.name,
-            };
-          }
-          return u;
-        });
+    async function bootAuthenticatedData() {
+      if (!authUser) {
+        setUsers([]);
+        setBets([]);
+        setIsLoadingProfiles(false);
+        setIsLoadingBets(false);
+        return;
       }
 
-      return [
-        ...prev,
-        {
-          id: authUser.id,
-          name:
-            authUser.user_metadata?.name ||
-            authUser.email?.split("@")[0] ||
-            "User",
-          email: authUser.email || "",
-        },
-      ];
-    });
+      await ensureCurrentProfile(authUser);
+      await Promise.all([loadProfiles(), loadBetsFromSupabase()]);
+    }
+
+    bootAuthenticatedData();
   }, [authUser]);
 
-  const otherUsers = users.filter((u) => u.id !== currentUser.id);
+  const otherUsers = users.filter((u) => u.id !== currentUser?.id);
 
   const filteredOpponentOptions = otherUsers.filter((u) =>
     u.name.toLowerCase().includes(opponentSearch.toLowerCase())
@@ -522,21 +512,23 @@ export default function App() {
   );
 
   const myProposedBets = bets.filter(
-    (b) => b.proposerId === currentUser.id && b.status === "proposed"
+    (b) => currentUser && b.proposerId === currentUser.id && b.status === "proposed"
   );
 
   const proposedToMe = bets.filter(
-    (b) => b.acceptorId === currentUser.id && b.status === "proposed"
+    (b) => currentUser && b.acceptorId === currentUser.id && b.status === "proposed"
   );
 
   const pendingBets = bets.filter(
     (b) =>
+      currentUser &&
       (b.proposerId === currentUser.id || b.acceptorId === currentUser.id) &&
       b.status === "accepted"
   );
 
   const unpaidGradedBets = bets.filter(
     (b) =>
+      currentUser &&
       (b.proposerId === currentUser.id || b.acceptorId === currentUser.id) &&
       b.status === "graded" &&
       !(b.proposerPaid && b.acceptorPaid)
@@ -544,24 +536,24 @@ export default function App() {
 
   const paidHistory = bets.filter(
     (b) =>
+      currentUser &&
       (b.proposerId === currentUser.id || b.acceptorId === currentUser.id) &&
       b.status === "settled"
   );
 
   const headToHead = useMemo(
-    () => getHeadToHeadTotals(currentUser.id, users, bets, historyFilter),
-    [currentUser.id, users, bets, historyFilter]
+    () =>
+      currentUser
+        ? getHeadToHeadTotals(currentUser.id, users, bets, historyFilter)
+        : [],
+    [currentUser, users, bets, historyFilter]
   );
 
   const outstanding = useMemo(
-    () => getOutstandingBalances(currentUser.id, users, bets),
-    [currentUser.id, users, bets]
+    () =>
+      currentUser ? getOutstandingBalances(currentUser.id, users, bets) : [],
+    [currentUser, users, bets]
   );
-
-  function closeAuthModalForNow() {
-    setShowAuthModal(false);
-    setAuthError("");
-  }
 
   async function handleSignup() {
     setAuthError("");
@@ -586,25 +578,23 @@ export default function App() {
       return;
     }
 
-    if (data.user) {
-      setUsers((prev) => {
-        const exists = prev.some((u) => u.id === data.user.id);
-        if (exists) return prev;
-        return [
-          ...prev,
-          {
-            id: data.user.id,
-            name: signupName.trim(),
-            email: signupEmail.trim(),
-          },
-        ];
+    if (!data.session) {
+      const signInResult = await supabase.auth.signInWithPassword({
+        email: signupEmail.trim(),
+        password: signupPassword,
       });
+
+      if (signInResult.error) {
+        setAuthError(
+          "Account created, but automatic sign-in did not finish. Check email confirmation settings in Supabase."
+        );
+        return;
+      }
     }
 
     setSignupName("");
     setSignupEmail("");
     setSignupPassword("");
-    setShowAuthModal(false);
   }
 
   async function handleLogin() {
@@ -622,14 +612,14 @@ export default function App() {
 
     setLoginEmail("");
     setLoginPassword("");
-    setShowAuthModal(false);
   }
 
   async function handleLogout() {
     await supabase.auth.signOut();
     setMenuOpen(false);
-    setShowAuthModal(true);
     setAuthMode("login");
+    setAuthError("");
+    setPage("home");
   }
 
   function resetCreateBetModal() {
@@ -708,6 +698,11 @@ export default function App() {
 
   async function handleCreateBet() {
     setCreateBetError("");
+
+    if (!currentUser) {
+      setCreateBetError("Please sign in.");
+      return;
+    }
 
     if (!selectedOpponentId) {
       setCreateBetError("Select an opponent.");
@@ -834,6 +829,8 @@ export default function App() {
   }
 
   async function gradeBet(betId, result) {
+    if (!currentUser) return;
+
     const bet = bets.find((b) => b.id === betId);
     if (!bet) return;
 
@@ -962,6 +959,8 @@ export default function App() {
   }
 
   async function markPaid(betId) {
+    if (!currentUser) return;
+
     const bet = bets.find((b) => b.id === betId);
     if (!bet) return;
 
@@ -1009,6 +1008,8 @@ export default function App() {
   }
 
   function renderBetCard(bet, options = {}) {
+    if (!currentUser) return null;
+
     const proposerName = getUserName(users, bet.proposerId);
     const acceptorName = getUserName(users, bet.acceptorId);
     const isMine =
@@ -1100,7 +1101,7 @@ export default function App() {
 
           <div className="sectionBlock">
             <div className="scrollList">
-              {Array.from({ length: 4 }).map((_, i) => (
+              {Array.from({ length: 5 }).map((_, i) => (
                 <div className="betCard" key={i}>
                   <div className="skeleton skeletonLineLg" />
                   <div className="skeleton skeletonLineSm" />
@@ -1116,6 +1117,9 @@ export default function App() {
       </div>
     );
   }
+
+  const showLockedState =
+    authLoading || !session || isLoadingBets || isLoadingProfiles;
 
   return (
     <>
@@ -1365,6 +1369,14 @@ export default function App() {
           font-weight: 800;
         }
 
+        .authCopy {
+          margin-bottom: 8px;
+        }
+
+        .authNoClose .closeX {
+          display: none;
+        }
+
         .closeX {
           position: absolute;
           right: 14px;
@@ -1592,6 +1604,10 @@ export default function App() {
           margin-top: 18px;
         }
 
+        .authShell {
+          position: relative;
+        }
+
         .skeleton {
           position: relative;
           overflow: hidden;
@@ -1713,55 +1729,150 @@ export default function App() {
       `}</style>
 
       <div className="appShell">
-        <header className="topbar">
-          <div className="titleBlock">
-            <h1 className="pageTitle">Bet Tracker</h1>
-            <div className="softText">
-              {authUser ? `Logged in as ${currentUser.name}` : "Preview mode"}
-            </div>
-          </div>
+        {showLockedState ? (
+          <div className="authShell">
+            {renderSkeletonScreen()}
 
-          <div className="menuWrap" onClick={(e) => e.stopPropagation()}>
-            <button className="menuBtn" onClick={() => setMenuOpen((p) => !p)}>
-              ☰
-            </button>
+            {!authLoading && !session && (
+              <div className="modalBackdrop">
+                <div className="modal authModal authNoClose">
+                  <h1 className="modalTitle">
+                    {authMode === "signup" ? "Create account" : "Sign In"}
+                  </h1>
 
-            {menuOpen && (
-              <div className="menuPanel">
-                <button
-                  onClick={() => {
-                    setPage("home");
-                    setMenuOpen(false);
-                  }}
-                >
-                  Home
-                </button>
-                <button
-                  onClick={() => {
-                    setPage("mybets");
-                    setMenuOpen(false);
-                  }}
-                >
-                  My Bets
-                </button>
-                <button
-                  onClick={() => {
-                    setPage("history");
-                    setMenuOpen(false);
-                  }}
-                >
-                  Bet History & Stats
-                </button>
-                <button onClick={handleLogout}>Log Out</button>
+                  <p className="softText center authCopy">
+                    Create an account or sign in to access Bet Tracker.
+                  </p>
+
+                  <div className="authToggleRow">
+                    <button
+                      className={authMode === "signup" ? "tabBtn active" : "tabBtn"}
+                      onClick={() => {
+                        setAuthMode("signup");
+                        setAuthError("");
+                      }}
+                    >
+                      Create Account
+                    </button>
+                    <button
+                      className={authMode === "login" ? "tabBtn active" : "tabBtn"}
+                      onClick={() => {
+                        setAuthMode("login");
+                        setAuthError("");
+                      }}
+                    >
+                      Sign In
+                    </button>
+                  </div>
+
+                  {authMode === "signup" ? (
+                    <>
+                      <div className="fieldGroup">
+                        <label>Name</label>
+                        <input
+                          value={signupName}
+                          onChange={(e) => setSignupName(e.target.value)}
+                          placeholder="Enter name"
+                        />
+                      </div>
+                      <div className="fieldGroup">
+                        <label>Email</label>
+                        <input
+                          value={signupEmail}
+                          onChange={(e) => setSignupEmail(e.target.value)}
+                          placeholder="Enter email"
+                        />
+                      </div>
+                      <div className="fieldGroup">
+                        <label>Password</label>
+                        <input
+                          type="password"
+                          value={signupPassword}
+                          onChange={(e) => setSignupPassword(e.target.value)}
+                          placeholder="Enter password"
+                        />
+                      </div>
+                      {authError && <div className="errorText">{authError}</div>}
+                      <button className="greenBtn full ctaSpacing" onClick={handleSignup}>
+                        Create Account
+                      </button>
+                    </>
+                  ) : (
+                    <>
+                      <div className="fieldGroup">
+                        <label>Email</label>
+                        <input
+                          value={loginEmail}
+                          onChange={(e) => setLoginEmail(e.target.value)}
+                          placeholder="Enter email"
+                        />
+                      </div>
+                      <div className="fieldGroup">
+                        <label>Password</label>
+                        <input
+                          type="password"
+                          value={loginPassword}
+                          onChange={(e) => setLoginPassword(e.target.value)}
+                          placeholder="Enter password"
+                        />
+                      </div>
+                      {authError && <div className="errorText">{authError}</div>}
+                      <button className="greenBtn full ctaSpacing" onClick={handleLogin}>
+                        Sign In
+                      </button>
+                    </>
+                  )}
+                </div>
               </div>
             )}
           </div>
-        </header>
-
-        {authLoading || isLoadingBets ? (
-          renderSkeletonScreen()
         ) : (
           <>
+            <header className="topbar">
+              <div className="titleBlock">
+                <h1 className="pageTitle">Bet Tracker</h1>
+                <div className="softText">
+                  Logged in as {currentUser?.name || "User"}
+                </div>
+              </div>
+
+              <div className="menuWrap" onClick={(e) => e.stopPropagation()}>
+                <button className="menuBtn" onClick={() => setMenuOpen((p) => !p)}>
+                  ☰
+                </button>
+
+                {menuOpen && (
+                  <div className="menuPanel">
+                    <button
+                      onClick={() => {
+                        setPage("home");
+                        setMenuOpen(false);
+                      }}
+                    >
+                      Home
+                    </button>
+                    <button
+                      onClick={() => {
+                        setPage("mybets");
+                        setMenuOpen(false);
+                      }}
+                    >
+                      My Bets
+                    </button>
+                    <button
+                      onClick={() => {
+                        setPage("history");
+                        setMenuOpen(false);
+                      }}
+                    >
+                      Bet History & Stats
+                    </button>
+                    <button onClick={handleLogout}>Log Out</button>
+                  </div>
+                )}
+              </div>
+            </header>
+
             {showCreateBetModal && (
               <div className="modalBackdrop">
                 <div className="modal createBetModal">
@@ -1779,7 +1890,7 @@ export default function App() {
 
                   <div className="fieldGroup">
                     <label>Proposed By</label>
-                    <input value={currentUser.name} disabled />
+                    <input value={currentUser?.name || ""} disabled />
                   </div>
 
                   <div className="fieldGroup">
@@ -2219,103 +2330,6 @@ export default function App() {
               </main>
             )}
           </>
-        )}
-
-        {showAuthModal && (
-          <div className="modalBackdrop">
-            <div className="modal authModal">
-              <button className="closeX" onClick={closeAuthModalForNow}>
-                ×
-              </button>
-
-              <h1 className="modalTitle">
-                {authMode === "signup" ? "Create account" : "Sign In"}
-              </h1>
-
-              <p className="softText center">
-                Create an account, sign in, or close this for a quick preview.
-              </p>
-
-              <div className="authToggleRow">
-                <button
-                  className={authMode === "signup" ? "tabBtn active" : "tabBtn"}
-                  onClick={() => {
-                    setAuthMode("signup");
-                    setAuthError("");
-                  }}
-                >
-                  Create Account
-                </button>
-                <button
-                  className={authMode === "login" ? "tabBtn active" : "tabBtn"}
-                  onClick={() => {
-                    setAuthMode("login");
-                    setAuthError("");
-                  }}
-                >
-                  Sign In
-                </button>
-              </div>
-
-              {authMode === "signup" ? (
-                <>
-                  <div className="fieldGroup">
-                    <label>Name</label>
-                    <input
-                      value={signupName}
-                      onChange={(e) => setSignupName(e.target.value)}
-                      placeholder="Enter name"
-                    />
-                  </div>
-                  <div className="fieldGroup">
-                    <label>Email</label>
-                    <input
-                      value={signupEmail}
-                      onChange={(e) => setSignupEmail(e.target.value)}
-                      placeholder="Enter email"
-                    />
-                  </div>
-                  <div className="fieldGroup">
-                    <label>Password</label>
-                    <input
-                      type="password"
-                      value={signupPassword}
-                      onChange={(e) => setSignupPassword(e.target.value)}
-                      placeholder="Enter password"
-                    />
-                  </div>
-                  {authError && <div className="errorText">{authError}</div>}
-                  <button className="greenBtn full ctaSpacing" onClick={handleSignup}>
-                    Create Account
-                  </button>
-                </>
-              ) : (
-                <>
-                  <div className="fieldGroup">
-                    <label>Email</label>
-                    <input
-                      value={loginEmail}
-                      onChange={(e) => setLoginEmail(e.target.value)}
-                      placeholder="Enter email"
-                    />
-                  </div>
-                  <div className="fieldGroup">
-                    <label>Password</label>
-                    <input
-                      type="password"
-                      value={loginPassword}
-                      onChange={(e) => setLoginPassword(e.target.value)}
-                      placeholder="Enter password"
-                    />
-                  </div>
-                  {authError && <div className="errorText">{authError}</div>}
-                  <button className="greenBtn full ctaSpacing" onClick={handleLogin}>
-                    Sign In
-                  </button>
-                </>
-              )}
-            </div>
-          </div>
         )}
       </div>
     </>
