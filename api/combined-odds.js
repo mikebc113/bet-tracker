@@ -2,109 +2,92 @@ const API_KEY = process.env.ODDS_API_KEY;
 const REGION = process.env.ODDS_REGION || "us";
 const BOOKMAKER = process.env.ODDS_BOOKMAKER || "draftkings";
 
+// ✅ ONLY COLLEGE BASKETBALL
 const SPORTS = [
-  { key: "basketball_ncaab", title: "College Basketball" },
-  { key: "baseball_mlb", title: "MLB" },
-  { key: "icehockey_nhl", title: "NHL" },
+  {
+    key: "basketball_ncaab",
+    title: "College Basketball",
+  },
 ];
-
-function normalizeMarketOutcome(event, bookmaker, marketKey) {
-  const market = bookmaker?.markets?.find((m) => m.key === marketKey);
-  if (!market?.outcomes?.length) return [];
-
-  if (marketKey === "h2h") {
-    return market.outcomes
-      .filter((outcome) => outcome.name === event.home_team || outcome.name === event.away_team)
-      .map((outcome) => ({
-        id: `${event.id}-h2h-${outcome.name}`,
-        sport_key: event.sport_key,
-        sport_title: event.sport_title,
-        commence_time: event.commence_time,
-        home_team: event.home_team,
-        away_team: event.away_team,
-        marketType: "side",
-        sidePick: "ml",
-        sideNumber: null,
-        totalPick: null,
-        totalNumber: null,
-        odds: outcome.price,
-        selectedTeam: outcome.name,
-        bookmaker: bookmaker.title,
-      }));
-  }
-
-  if (marketKey === "spreads") {
-    return market.outcomes
-      .filter(
-        (outcome) =>
-          (outcome.name === event.home_team || outcome.name === event.away_team) &&
-          typeof outcome.point === "number"
-      )
-      .map((outcome) => ({
-        id: `${event.id}-spread-${outcome.name}-${outcome.point}`,
-        sport_key: event.sport_key,
-        sport_title: event.sport_title,
-        commence_time: event.commence_time,
-        home_team: event.home_team,
-        away_team: event.away_team,
-        marketType: "side",
-        sidePick: outcome.point > 0 ? "plus" : "minus",
-        sideNumber: Math.abs(outcome.point),
-        totalPick: null,
-        totalNumber: null,
-        odds: outcome.price,
-        selectedTeam: outcome.name,
-        bookmaker: bookmaker.title,
-      }));
-  }
-
-  if (marketKey === "totals") {
-    return market.outcomes
-      .filter(
-        (outcome) =>
-          (outcome.name === "Over" || outcome.name === "Under") &&
-          typeof outcome.point === "number"
-      )
-      .map((outcome) => ({
-        id: `${event.id}-total-${outcome.name}-${outcome.point}`,
-        sport_key: event.sport_key,
-        sport_title: event.sport_title,
-        commence_time: event.commence_time,
-        home_team: event.home_team,
-        away_team: event.away_team,
-        marketType: "total",
-        sidePick: null,
-        sideNumber: null,
-        totalPick: outcome.name.toLowerCase(),
-        totalNumber: outcome.point,
-        odds: outcome.price,
-        selectedTeam: null,
-        bookmaker: bookmaker.title,
-      }));
-  }
-
-  return [];
-}
 
 function chooseBookmaker(event) {
   if (!Array.isArray(event.bookmakers) || !event.bookmakers.length) return null;
 
-  const preferred =
-    event.bookmakers.find((book) => book.key === BOOKMAKER) ||
-    event.bookmakers[0];
-
-  return preferred || null;
+  return event.bookmakers.find((book) => book.key === BOOKMAKER) || event.bookmakers[0];
 }
 
-function flattenEventToLines(event) {
-  const bookmaker = chooseBookmaker(event);
-  if (!bookmaker) return [];
+function getMarket(bookmaker, key) {
+  return bookmaker?.markets?.find((m) => m.key === key) || null;
+}
 
-  return [
-    ...normalizeMarketOutcome(event, bookmaker, "h2h"),
-    ...normalizeMarketOutcome(event, bookmaker, "spreads"),
-    ...normalizeMarketOutcome(event, bookmaker, "totals"),
-  ];
+function getOutcomeByName(market, name) {
+  return market?.outcomes?.find((o) => o.name === name) || null;
+}
+
+function getTotalOutcome(market, label) {
+  return market?.outcomes?.find((o) => o.name === label) || null;
+}
+
+function mapEventToBoardGame(event, fallbackSportTitle) {
+  const bookmaker = chooseBookmaker(event);
+  if (!bookmaker) return null;
+
+  const h2h = getMarket(bookmaker, "h2h");
+  const spreads = getMarket(bookmaker, "spreads");
+  const totals = getMarket(bookmaker, "totals");
+
+  const homeMl = getOutcomeByName(h2h, event.home_team)?.price ?? null;
+  const awayMl = getOutcomeByName(h2h, event.away_team)?.price ?? null;
+
+  const homeSpread = getOutcomeByName(spreads, event.home_team);
+  const awaySpread = getOutcomeByName(spreads, event.away_team);
+
+  const over = getTotalOutcome(totals, "Over");
+  const under = getTotalOutcome(totals, "Under");
+
+  return {
+    id: event.id,
+    sport_key: event.sport_key,
+    sport_title: event.sport_title || fallbackSportTitle,
+    commence_time: event.commence_time,
+    home_team: event.home_team,
+    away_team: event.away_team,
+    home_logo: "",
+    away_logo: "",
+    bookmakers: [
+      {
+        key: bookmaker.key,
+        title: bookmaker.title,
+        markets: [
+          {
+            key: "h2h",
+            outcomes: [
+              ...(homeMl != null ? [{ name: event.home_team, price: homeMl }] : []),
+              ...(awayMl != null ? [{ name: event.away_team, price: awayMl }] : []),
+            ],
+          },
+          {
+            key: "spreads",
+            outcomes: [
+              ...(homeSpread
+                ? [{ name: event.home_team, point: homeSpread.point, price: homeSpread.price }]
+                : []),
+              ...(awaySpread
+                ? [{ name: event.away_team, point: awaySpread.point, price: awaySpread.price }]
+                : []),
+            ],
+          },
+          {
+            key: "totals",
+            outcomes: [
+              ...(over ? [{ name: "Over", point: over.point, price: over.price }] : []),
+              ...(under ? [{ name: "Under", point: under.point, price: under.price }] : []),
+            ],
+          },
+        ],
+      },
+    ],
+  };
 }
 
 async function fetchSportOdds(sport) {
@@ -124,14 +107,11 @@ async function fetchSportOdds(sport) {
 
   const data = await response.json();
 
-  return Array.isArray(data)
-    ? data.flatMap((event) =>
-        flattenEventToLines({
-          ...event,
-          sport_title: event.sport_title || sport.title,
-        })
-      )
-    : [];
+  if (!Array.isArray(data)) return [];
+
+  return data
+    .map((event) => mapEventToBoardGame(event, sport.title))
+    .filter(Boolean);
 }
 
 export default async function handler(req, res) {
