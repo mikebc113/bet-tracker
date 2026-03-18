@@ -3,10 +3,6 @@ import { supabase } from "./supabase";
 
 const filters = ["Day", "Month", "Year", "All Time"];
 
-function uid() {
-  return `${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
-}
-
 function currency(value) {
   const num = Number(value || 0);
   const abs = Math.abs(num).toLocaleString();
@@ -15,6 +11,14 @@ function currency(value) {
 
 function getNow() {
   return new Date().toISOString();
+}
+
+function safeJsonParse(value) {
+  try {
+    return JSON.parse(value);
+  } catch {
+    return null;
+  }
 }
 
 function isInFilter(dateString, filter) {
@@ -38,7 +42,7 @@ function isInFilter(dateString, filter) {
 }
 
 function getUserName(users, userId) {
-  return users.find((u) => u.id === userId)?.name || "Unknown";
+  return users.find((u) => u.id === userId)?.username || "Unknown";
 }
 
 function getBetDisplayStatus(bet) {
@@ -48,18 +52,6 @@ function getBetDisplayStatus(bet) {
   if (bet.status === "graded") return "Awaiting payment";
   if (bet.status === "settled") return "Settled";
   return bet.status;
-}
-
-function getOpenFeedBets(bets) {
-  return bets.filter((b) => b.status === "accepted");
-}
-
-function safeJsonParse(value) {
-  try {
-    return JSON.parse(value);
-  } catch {
-    return null;
-  }
 }
 
 function buildCustomPayload(details) {
@@ -98,10 +90,7 @@ function serializeBetPayload(payload) {
 
 function parseBetPayload(text) {
   const parsed = safeJsonParse(text);
-
-  if (parsed && parsed.version === 2 && parsed.kind) {
-    return parsed;
-  }
+  if (parsed && parsed.version === 2 && parsed.kind) return parsed;
 
   return {
     version: 1,
@@ -225,10 +214,10 @@ function getLeaderboard(users, bets, filter) {
       }
     });
 
-    return { userId: user.id, name: user.name, net };
+    return { userId: user.id, username: user.username, net };
   });
 
-  return totals.sort((a, b) => b.net - a.net);
+  return totals.filter((x) => x.net !== 0).sort((a, b) => b.net - a.net);
 }
 
 function getHeadToHeadTotals(currentUserId, users, bets, filter) {
@@ -251,7 +240,7 @@ function getHeadToHeadTotals(currentUserId, users, bets, filter) {
     const otherName = getUserName(users, otherUserId);
 
     if (!map.has(otherUserId)) {
-      map.set(otherUserId, { userId: otherUserId, name: otherName, net: 0 });
+      map.set(otherUserId, { userId: otherUserId, username: otherName, net: 0 });
     }
 
     const item = map.get(otherUserId);
@@ -277,7 +266,6 @@ function getOutstandingBalances(currentUserId, users, bets) {
 
   bets.forEach((bet) => {
     if (bet.status !== "graded") return;
-    if (bet.proposerPaid && bet.acceptorPaid) return;
     if (bet.proposerId !== currentUserId && bet.acceptorId !== currentUserId) {
       return;
     }
@@ -287,7 +275,7 @@ function getOutstandingBalances(currentUserId, users, bets) {
     const otherName = getUserName(users, otherUserId);
 
     if (!map.has(otherUserId)) {
-      map.set(otherUserId, { userId: otherUserId, name: otherName, net: 0 });
+      map.set(otherUserId, { userId: otherUserId, username: otherName, net: 0 });
     }
 
     const item = map.get(otherUserId);
@@ -295,17 +283,19 @@ function getOutstandingBalances(currentUserId, users, bets) {
     const stake = Number(bet.amount || 0);
 
     if (bet.proposerGrade === "win" && bet.acceptorGrade === "loss") {
-      if (bet.proposerId === currentUserId && !bet.proposerPaid) item.net += winAmount;
-      if (bet.acceptorId === currentUserId && !bet.acceptorPaid) item.net -= stake;
+      if (bet.proposerId === currentUserId) item.net += winAmount;
+      if (bet.acceptorId === currentUserId) item.net -= stake;
     }
 
     if (bet.proposerGrade === "loss" && bet.acceptorGrade === "win") {
-      if (bet.acceptorId === currentUserId && !bet.acceptorPaid) item.net += winAmount;
-      if (bet.proposerId === currentUserId && !bet.proposerPaid) item.net -= stake;
+      if (bet.acceptorId === currentUserId) item.net += winAmount;
+      if (bet.proposerId === currentUserId) item.net -= stake;
     }
   });
 
-  return Array.from(map.values()).sort((a, b) => b.net - a.net);
+  return Array.from(map.values())
+    .filter((x) => x.net !== 0)
+    .sort((a, b) => b.net - a.net);
 }
 
 function mapDbBetToUi(bet) {
@@ -327,14 +317,63 @@ function mapDbBetToUi(bet) {
   };
 }
 
+function SettleUpLogo({ centered = false, small = false }) {
+  return (
+    <div className={`logoWrap ${centered ? "centered" : ""} ${small ? "small" : ""}`}>
+      <div className="logoIcon">
+        <svg viewBox="0 0 120 120" aria-hidden="true">
+          <defs>
+            <linearGradient id="suBlueGreen" x1="0%" y1="0%" x2="100%" y2="100%">
+              <stop offset="0%" stopColor="#46D7FF" />
+              <stop offset="55%" stopColor="#37C78A" />
+              <stop offset="100%" stopColor="#A7E15F" />
+            </linearGradient>
+            <linearGradient id="suCoin" x1="0%" y1="0%" x2="100%" y2="100%">
+              <stop offset="0%" stopColor="#F7D56C" />
+              <stop offset="100%" stopColor="#D89E1F" />
+            </linearGradient>
+          </defs>
+
+          <circle cx="60" cy="60" r="44" fill="none" stroke="url(#suBlueGreen)" strokeWidth="8" opacity="0.95" />
+          <path d="M25 40c8-14 23-24 40-24" stroke="#46D7FF" strokeWidth="8" strokeLinecap="round" fill="none" />
+          <path d="M93 76c-7 16-22 28-42 28" stroke="#A7E15F" strokeWidth="8" strokeLinecap="round" fill="none" />
+          <path d="M68 13l10 5-11 8" fill="#46D7FF" />
+          <path d="M54 109l-10-5 11-8" fill="#A7E15F" />
+
+          <ellipse cx="50" cy="58" rx="14" ry="6" fill="url(#suCoin)" />
+          <rect x="36" y="58" width="28" height="8" fill="url(#suCoin)" />
+          <ellipse cx="50" cy="66" rx="14" ry="6" fill="url(#suCoin)" />
+
+          <ellipse cx="70" cy="49" rx="14" ry="6" fill="url(#suCoin)" />
+          <rect x="56" y="49" width="28" height="8" fill="url(#suCoin)" />
+          <ellipse cx="70" cy="57" rx="14" ry="6" fill="url(#suCoin)" />
+
+          <path d="M78 77l8 8 18-24" fill="none" stroke="#A7E15F" strokeWidth="8" strokeLinecap="round" strokeLinejoin="round" />
+
+          <rect x="80" y="34" width="18" height="24" rx="3" fill="#F7FBFF" opacity="0.95" />
+          <line x1="84" y1="40" x2="94" y2="40" stroke="#37C78A" strokeWidth="2.4" />
+          <line x1="84" y1="45" x2="95" y2="45" stroke="#9DB7C7" strokeWidth="2" />
+          <line x1="84" y1="50" x2="91" y2="50" stroke="#9DB7C7" strokeWidth="2" />
+        </svg>
+      </div>
+
+      <div className="logoText">
+        <div className="logoTitle">SettleUp</div>
+        <div className="logoSub">BET TRACKER</div>
+      </div>
+    </div>
+  );
+}
+
 export default function App() {
   const [users, setUsers] = useState([]);
   const [bets, setBets] = useState([]);
   const [session, setSession] = useState(null);
 
   const [authLoading, setAuthLoading] = useState(true);
-  const [isLoadingBets, setIsLoadingBets] = useState(true);
-  const [isLoadingProfiles, setIsLoadingProfiles] = useState(true);
+  const [profilesLoading, setProfilesLoading] = useState(true);
+  const [betsLoading, setBetsLoading] = useState(true);
+  const [pageLoading, setPageLoading] = useState(false);
 
   const [page, setPage] = useState("home");
   const [menuOpen, setMenuOpen] = useState(false);
@@ -373,6 +412,14 @@ export default function App() {
   const [historyFilter, setHistoryFilter] = useState("All Time");
   const [gradeWarnings, setGradeWarnings] = useState({});
 
+  const [accountUsername, setAccountUsername] = useState("");
+  const [accountFirstName, setAccountFirstName] = useState("");
+  const [accountLastName, setAccountLastName] = useState("");
+  const [accountEmail, setAccountEmail] = useState("");
+  const [accountMessage, setAccountMessage] = useState("");
+  const [accountError, setAccountError] = useState("");
+  const [savingAccount, setSavingAccount] = useState(false);
+
   const authUser = session?.user || null;
 
   const currentUser = useMemo(() => {
@@ -385,15 +432,26 @@ export default function App() {
     return (
       match || {
         id: authUser.id,
-        name:
+        username:
           authUser.user_metadata?.username ||
-          authUser.user_metadata?.name ||
           authUser.email?.split("@")[0] ||
           "User",
+        firstName: authUser.user_metadata?.first_name || "",
+        lastName: authUser.user_metadata?.last_name || "",
         email: authUser.email || "",
       }
     );
   }, [authUser, users]);
+
+  const validUserIds = useMemo(() => new Set(users.map((u) => u.id)), [users]);
+
+  const validBets = useMemo(
+    () =>
+      bets.filter(
+        (b) => validUserIds.has(b.proposerId) && validUserIds.has(b.acceptorId)
+      ),
+    [bets, validUserIds]
+  );
 
   useEffect(() => {
     async function initAuth() {
@@ -411,8 +469,10 @@ export default function App() {
       data: { subscription },
     } = supabase.auth.onAuthStateChange((_event, nextSession) => {
       setSession(nextSession || null);
+      setMenuOpen(false);
       if (!nextSession) {
         setShowCreateBetModal(false);
+        setPage("home");
       }
     });
 
@@ -425,27 +485,6 @@ export default function App() {
     return () => window.removeEventListener("click", handleClick);
   }, [menuOpen]);
 
-  async function loadProfiles() {
-    if (!authUser) {
-      setUsers([]);
-      setIsLoadingProfiles(false);
-      return;
-    }
-
-    setIsLoadingProfiles(true);
-
-    const { data, error } = await supabase
-      .from("profiles")
-      .select("id, email, name")
-      .order("name", { ascending: true });
-
-    if (!error && data) {
-      setUsers(data);
-    }
-
-    setIsLoadingProfiles(false);
-  }
-
   async function ensureCurrentProfile(user) {
     if (!user) return;
 
@@ -454,22 +493,52 @@ export default function App() {
       email: user.email || "",
       name:
         user.user_metadata?.username ||
-        user.user_metadata?.name ||
         user.email?.split("@")[0] ||
         "User",
+      first_name: user.user_metadata?.first_name || "",
+      last_name: user.user_metadata?.last_name || "",
     };
 
     await supabase.from("profiles").upsert(profile);
   }
 
-  async function loadBetsFromSupabase() {
+  async function loadProfiles() {
     if (!authUser) {
-      setBets([]);
-      setIsLoadingBets(false);
+      setUsers([]);
+      setProfilesLoading(false);
       return;
     }
 
-    setIsLoadingBets(true);
+    setProfilesLoading(true);
+
+    const { data, error } = await supabase
+      .from("profiles")
+      .select("id, email, name, first_name, last_name")
+      .order("name", { ascending: true });
+
+    if (!error && data) {
+      setUsers(
+        data.map((u) => ({
+          id: u.id,
+          email: u.email,
+          username: u.name,
+          firstName: u.first_name || "",
+          lastName: u.last_name || "",
+        }))
+      );
+    }
+
+    setProfilesLoading(false);
+  }
+
+  async function loadBets() {
+    if (!authUser) {
+      setBets([]);
+      setBetsLoading(false);
+      return;
+    }
+
+    setBetsLoading(true);
 
     const { data, error } = await supabase
       .from("bets")
@@ -480,114 +549,136 @@ export default function App() {
       setBets(data.map(mapDbBetToUi));
     }
 
-    setIsLoadingBets(false);
+    setBetsLoading(false);
+  }
+
+  async function cleanupOrphanBets(userRows, betRows) {
+    const ids = new Set(userRows.map((u) => u.id));
+    const orphanIds = betRows
+      .filter((b) => !ids.has(b.proposerId) || !ids.has(b.acceptorId))
+      .map((b) => b.id);
+
+    if (!orphanIds.length) return;
+
+    await supabase.from("bets").delete().in("id", orphanIds);
+    setBets((prev) => prev.filter((b) => !orphanIds.includes(b.id)));
   }
 
   useEffect(() => {
-    async function bootAuthenticatedData() {
+    async function boot() {
       if (!authUser) {
         setUsers([]);
         setBets([]);
-        setIsLoadingProfiles(false);
-        setIsLoadingBets(false);
+        setProfilesLoading(false);
+        setBetsLoading(false);
         return;
       }
 
       await ensureCurrentProfile(authUser);
-      await Promise.all([loadProfiles(), loadBetsFromSupabase()]);
+      await Promise.all([loadProfiles(), loadBets()]);
     }
 
-    bootAuthenticatedData();
+    boot();
   }, [authUser]);
+
+  useEffect(() => {
+    if (!users.length || !bets.length) return;
+    cleanupOrphanBets(users, bets);
+  }, [users, bets]);
+
+  useEffect(() => {
+    if (!currentUser) return;
+    setAccountUsername(currentUser.username || "");
+    setAccountFirstName(currentUser.firstName || "");
+    setAccountLastName(currentUser.lastName || "");
+    setAccountEmail(currentUser.email || "");
+  }, [currentUser]);
 
   const otherUsers = users.filter((u) => u.id !== currentUser?.id);
 
   const filteredOpponentOptions = otherUsers.filter((u) =>
-    u.name.toLowerCase().includes(opponentSearch.toLowerCase())
+    u.username.toLowerCase().includes(opponentSearch.toLowerCase())
   );
 
-  const openBetsFeed = useMemo(() => getOpenFeedBets(bets), [bets]);
+  const openBetsFeed = validBets.filter((b) => b.status === "accepted");
 
   const leaderboard = useMemo(
-    () => getLeaderboard(users, bets, leaderboardFilter),
-    [users, bets, leaderboardFilter]
+    () => getLeaderboard(users, validBets, leaderboardFilter),
+    [users, validBets, leaderboardFilter]
   );
 
-  const myProposedBets = bets.filter(
+  const myProposedBets = validBets.filter(
     (b) => currentUser && b.proposerId === currentUser.id && b.status === "proposed"
   );
 
-  const proposedToMe = bets.filter(
+  const proposedToMe = validBets.filter(
     (b) => currentUser && b.acceptorId === currentUser.id && b.status === "proposed"
   );
 
-  const pendingBets = bets.filter(
+  const pendingBets = validBets.filter(
     (b) =>
       currentUser &&
       (b.proposerId === currentUser.id || b.acceptorId === currentUser.id) &&
       b.status === "accepted"
   );
 
-  const unpaidGradedBets = bets.filter(
+  const unpaidGradedBets = validBets.filter(
     (b) =>
       currentUser &&
       (b.proposerId === currentUser.id || b.acceptorId === currentUser.id) &&
-      b.status === "graded" &&
-      !(b.proposerPaid && b.acceptorPaid)
+      b.status === "graded"
   );
 
-  const paidHistory = bets.filter(
+  const paidHistory = validBets.filter(
     (b) =>
       currentUser &&
       (b.proposerId === currentUser.id || b.acceptorId === currentUser.id) &&
       b.status === "settled"
   );
 
+  const outstanding = useMemo(
+    () =>
+      currentUser ? getOutstandingBalances(currentUser.id, users, validBets) : [],
+    [currentUser, users, validBets]
+  );
+
   const headToHead = useMemo(
     () =>
       currentUser
-        ? getHeadToHeadTotals(currentUser.id, users, bets, historyFilter)
+        ? getHeadToHeadTotals(currentUser.id, users, validBets, historyFilter)
         : [],
-    [currentUser, users, bets, historyFilter]
+    [currentUser, users, validBets, historyFilter]
   );
 
-  const outstanding = useMemo(
-    () =>
-      currentUser ? getOutstandingBalances(currentUser.id, users, bets) : [],
-    [currentUser, users, bets]
-  );
-
-  async function usernameExists(username) {
+  async function usernameExists(username, excludeId = null) {
     const clean = username.trim().toLowerCase();
+
     const { data, error } = await supabase
       .from("profiles")
       .select("id, name")
       .ilike("name", clean)
-      .limit(1);
+      .limit(10);
 
     if (error) return false;
-    return Array.isArray(data) && data.length > 0;
+
+    return data.some((row) => row.id !== excludeId);
   }
 
   async function handleSignup() {
     setAuthError("");
 
-    if (!signupUsername || !signupEmail || !signupPassword) {
+    const cleanUsername = signupUsername.trim();
+    if (!cleanUsername || !signupEmail || !signupPassword) {
       setAuthError("Please fill out all create account fields.");
       return;
     }
-
-    const cleanUsername = signupUsername.trim();
 
     if (cleanUsername.length < 3) {
       setAuthError("Username must be at least 3 characters.");
       return;
     }
 
-    const exists = users.some(
-      (u) => u.name.toLowerCase() === cleanUsername.toLowerCase()
-    ) || (await usernameExists(cleanUsername));
-
+    const exists = await usernameExists(cleanUsername);
     if (exists) {
       setAuthError("That username is already taken.");
       return;
@@ -599,6 +690,8 @@ export default function App() {
       options: {
         data: {
           username: cleanUsername,
+          first_name: "",
+          last_name: "",
         },
       },
     });
@@ -608,15 +701,15 @@ export default function App() {
       return;
     }
 
-    if (!data.session) {
-      const signInResult = await supabase.auth.signInWithPassword({
+    if (data.user && !data.session) {
+      const secondLogin = await supabase.auth.signInWithPassword({
         email: signupEmail.trim(),
         password: signupPassword,
       });
 
-      if (signInResult.error) {
+      if (secondLogin.error) {
         setAuthError(
-          "Account created, but automatic sign-in did not finish. Check email confirmation settings in Supabase."
+          "Account created, but automatic sign-in did not finish. Turn off email confirmation in Supabase Email Auth while building."
         );
         return;
       }
@@ -646,10 +739,18 @@ export default function App() {
 
   async function handleLogout() {
     await supabase.auth.signOut();
-    setMenuOpen(false);
-    setAuthMode("login");
     setAuthError("");
-    setPage("home");
+    setAuthMode("login");
+    setShowCreateBetModal(false);
+  }
+
+  function goToPage(nextPage) {
+    setMenuOpen(false);
+    setPageLoading(true);
+    setTimeout(() => {
+      setPage(nextPage);
+      setPageLoading(false);
+    }, 180);
   }
 
   function resetCreateBetModal() {
@@ -677,19 +778,15 @@ export default function App() {
 
   function resolveTypedOpponentId() {
     if (selectedOpponentId) return selectedOpponentId;
-
     const clean = opponentSearch.trim().toLowerCase();
     if (!clean) return "";
-
-    const exactMatch = otherUsers.find((u) => u.name.toLowerCase() === clean);
-    return exactMatch?.id || "";
+    const exact = otherUsers.find((u) => u.username.toLowerCase() === clean);
+    return exact?.id || "";
   }
 
   function getCreateBetPayload() {
     if (betMode === "custom") {
-      if (!customBetDetails.trim()) {
-        return { error: "Add custom bet details." };
-      }
+      if (!customBetDetails.trim()) return { error: "Add custom bet details." };
       return { payload: buildCustomPayload(customBetDetails) };
     }
 
@@ -698,9 +795,7 @@ export default function App() {
     }
 
     if (marketType === "total") {
-      if (!totalNumber.trim()) {
-        return { error: "Enter the total number." };
-      }
+      if (!totalNumber.trim()) return { error: "Enter the total number." };
 
       return {
         payload: buildClassicPayload({
@@ -715,25 +810,21 @@ export default function App() {
       };
     }
 
-    if (marketType === "side") {
-      if (sidePick !== "ml" && !sideNumber.trim()) {
-        return { error: "Enter the spread number." };
-      }
-
-      return {
-        payload: buildClassicPayload({
-          takingTeam,
-          againstTeam,
-          marketType,
-          totalPick,
-          totalNumber,
-          sidePick,
-          sideNumber: sidePick === "ml" ? "EVEN" : sideNumber.trim(),
-        }),
-      };
+    if (sidePick !== "ml" && !sideNumber.trim()) {
+      return { error: "Enter the spread number." };
     }
 
-    return { error: "Unable to build bet." };
+    return {
+      payload: buildClassicPayload({
+        takingTeam,
+        againstTeam,
+        marketType,
+        totalPick,
+        totalNumber,
+        sidePick,
+        sideNumber: sidePick === "ml" ? "EVEN" : sideNumber.trim(),
+      }),
+    };
   }
 
   async function handleCreateBet() {
@@ -751,26 +842,28 @@ export default function App() {
       return;
     }
 
+    if (resolvedOpponentId === currentUser.id) {
+      setCreateBetError("You cannot create a bet against yourself.");
+      return;
+    }
+
     if (!betAmount || !winAmount) {
       setCreateBetError("Enter bet amount and win amount.");
       return;
     }
 
     const result = getCreateBetPayload();
-
     if (result.error) {
       setCreateBetError(result.error);
       return;
     }
 
-    const payload = result.payload;
-
     const newBet = {
-      id: uid(),
+      id: crypto.randomUUID(),
       proposerId: currentUser.id,
       acceptorId: resolvedOpponentId,
-      text: serializeBetPayload(payload),
-      betPayload: payload,
+      text: serializeBetPayload(result.payload),
+      betPayload: result.payload,
       amount: Number(betAmount),
       winAmount: Number(winAmount),
       status: "proposed",
@@ -808,6 +901,9 @@ export default function App() {
     setBets((prev) => [newBet, ...prev]);
     setShowCreateBetModal(false);
     resetCreateBetModal();
+
+    setPageLoading(true);
+    setTimeout(() => setPageLoading(false), 250);
   }
 
   async function deleteBet(betId) {
@@ -824,6 +920,8 @@ export default function App() {
       .update({
         status: "accepted",
         updated_at: updatedAt,
+        proposer_grade: null,
+        acceptor_grade: null,
       })
       .eq("id", betId);
 
@@ -864,9 +962,7 @@ export default function App() {
     if (error) return;
 
     setBets((prev) =>
-      prev.map((b) =>
-        b.id === betId ? { ...b, status: "declined", updatedAt } : b
-      )
+      prev.map((b) => (b.id === betId ? { ...b, status: "declined", updatedAt } : b))
     );
   }
 
@@ -962,7 +1058,6 @@ export default function App() {
 
     if (result !== otherGrade) {
       const updatedAt = getNow();
-
       const nextProposerGrade = isProposer ? result : bet.proposerGrade;
       const nextAcceptorGrade = isProposer ? bet.acceptorGrade : result;
 
@@ -1000,26 +1095,15 @@ export default function App() {
     }
   }
 
-  async function markPaid(betId) {
-    if (!currentUser) return;
-
-    const bet = bets.find((b) => b.id === betId);
-    if (!bet) return;
-
-    const isProposer = bet.proposerId === currentUser.id;
+  async function settleBet(betId) {
     const updatedAt = getNow();
-
-    const nextProposerPaid = isProposer ? true : bet.proposerPaid;
-    const nextAcceptorPaid = isProposer ? bet.acceptorPaid : true;
-    const nextStatus =
-      nextProposerPaid && nextAcceptorPaid ? "settled" : "graded";
 
     const { error } = await supabase
       .from("bets")
       .update({
-        proposer_paid: nextProposerPaid,
-        acceptor_paid: nextAcceptorPaid,
-        status: nextStatus,
+        proposer_paid: true,
+        acceptor_paid: true,
+        status: "settled",
         updated_at: updatedAt,
       })
       .eq("id", betId);
@@ -1031,14 +1115,130 @@ export default function App() {
         b.id === betId
           ? {
               ...b,
-              proposerPaid: nextProposerPaid,
-              acceptorPaid: nextAcceptorPaid,
-              status: nextStatus,
+              proposerPaid: true,
+              acceptorPaid: true,
+              status: "settled",
               updatedAt,
             }
           : b
       )
     );
+  }
+
+  async function settleAllWithUser(otherUserId) {
+    if (!currentUser) return;
+
+    const rows = validBets.filter(
+      (b) =>
+        b.status === "graded" &&
+        ((b.proposerId === currentUser.id && b.acceptorId === otherUserId) ||
+          (b.proposerId === otherUserId && b.acceptorId === currentUser.id))
+    );
+
+    if (!rows.length) return;
+
+    const ids = rows.map((b) => b.id);
+    const updatedAt = getNow();
+
+    const { error } = await supabase
+      .from("bets")
+      .update({
+        proposer_paid: true,
+        acceptor_paid: true,
+        status: "settled",
+        updated_at: updatedAt,
+      })
+      .in("id", ids);
+
+    if (error) return;
+
+    setBets((prev) =>
+      prev.map((b) =>
+        ids.includes(b.id)
+          ? {
+              ...b,
+              proposerPaid: true,
+              acceptorPaid: true,
+              status: "settled",
+              updatedAt,
+            }
+          : b
+      )
+    );
+  }
+
+  async function handleSaveAccount() {
+    if (!currentUser) return;
+
+    setSavingAccount(true);
+    setAccountError("");
+    setAccountMessage("");
+
+    const cleanUsername = accountUsername.trim();
+    if (!cleanUsername) {
+      setAccountError("Username is required.");
+      setSavingAccount(false);
+      return;
+    }
+
+    if (cleanUsername.length < 3) {
+      setAccountError("Username must be at least 3 characters.");
+      setSavingAccount(false);
+      return;
+    }
+
+    const exists = await usernameExists(cleanUsername, currentUser.id);
+    if (exists) {
+      setAccountError("That username is already taken.");
+      setSavingAccount(false);
+      return;
+    }
+
+    const profilePayload = {
+      id: currentUser.id,
+      name: cleanUsername,
+      first_name: accountFirstName.trim(),
+      last_name: accountLastName.trim(),
+      email: accountEmail.trim(),
+    };
+
+    const profileResult = await supabase.from("profiles").upsert(profilePayload);
+
+    if (profileResult.error) {
+      setAccountError("Could not save account details.");
+      setSavingAccount(false);
+      return;
+    }
+
+    const authPayload = {
+      data: {
+        username: cleanUsername,
+        first_name: accountFirstName.trim(),
+        last_name: accountLastName.trim(),
+      },
+    };
+
+    if (
+      accountEmail.trim() &&
+      accountEmail.trim().toLowerCase() !== (currentUser.email || "").toLowerCase()
+    ) {
+      authPayload.email = accountEmail.trim();
+    }
+
+    const { error } = await supabase.auth.updateUser(authPayload);
+
+    if (error) {
+      setAccountError(
+        "Profile saved, but auth email update may require confirmation in Supabase."
+      );
+      setSavingAccount(false);
+      await loadProfiles();
+      return;
+    }
+
+    await loadProfiles();
+    setAccountMessage("Account updated.");
+    setSavingAccount(false);
   }
 
   function renderGradeWarning(betId) {
@@ -1054,8 +1254,6 @@ export default function App() {
 
     const proposerName = getUserName(users, bet.proposerId);
     const acceptorName = getUserName(users, bet.acceptorId);
-    const isMine =
-      bet.proposerId === currentUser.id || bet.acceptorId === currentUser.id;
     const iAmWinner =
       (bet.proposerId === currentUser.id &&
         bet.proposerGrade === "win" &&
@@ -1064,12 +1262,13 @@ export default function App() {
         bet.acceptorGrade === "win" &&
         bet.proposerGrade === "loss");
 
-    const paymentText = iAmWinner ? "Got Paid" : "Paid";
+    const paymentText = iAmWinner ? "Got Paid!" : "Paid Up!";
     const headline = getBetHeadlineForViewer(bet, currentUser.id);
     const subline = getBetSublineForViewer(bet, currentUser.id, users);
 
     return (
-      <div key={bet.id} className="betCard compact">
+      <div key={bet.id} className="betCard">
+        <div className="betGlow" />
         <div className="betRowTop">
           <div className="betLeft">
             <div className="betTitle">{headline}</div>
@@ -1095,8 +1294,8 @@ export default function App() {
                   Loss
                 </button>
               </div>
-            ) : options.showPayment && isMine ? (
-              <button className="greenBtn miniBtn" onClick={() => markPaid(bet.id)}>
+            ) : options.showPayment ? (
+              <button className="greenBtn miniBtn" onClick={() => settleBet(bet.id)}>
                 {paymentText}
               </button>
             ) : options.showDelete ? (
@@ -1138,13 +1337,14 @@ export default function App() {
     return (
       <div className="pageGrid">
         <section className="prettyCard">
+          <div className="skeleton skeletonLogo" />
           <div className="skeleton skeletonTitle" />
           <div className="skeleton skeletonSub" />
 
           <div className="sectionBlock">
             <div className="scrollList">
-              {Array.from({ length: 5 }).map((_, i) => (
-                <div className="betCard" key={i}>
+              {Array.from({ length: 4 }).map((_, i) => (
+                <div className="betCard skeletonCard" key={i}>
                   <div className="skeleton skeletonLineLg" />
                   <div className="skeleton skeletonLineSm" />
                   <div className="skeletonRow">
@@ -1161,7 +1361,7 @@ export default function App() {
   }
 
   const showLockedState =
-    authLoading || !session || isLoadingBets || isLoadingProfiles;
+    authLoading || !session || profilesLoading || betsLoading;
 
   return (
     <>
@@ -1169,95 +1369,201 @@ export default function App() {
         :root {
           color-scheme: dark;
           font-family: Inter, system-ui, Arial, sans-serif;
+          --bg-1: #07090d;
+          --bg-2: #0d1118;
+          --line: rgba(255,255,255,0.11);
+          --text: #f4f7fb;
+          --muted: #98a1ae;
+          --green: #26cf60;
+          --teal: #46d7ff;
+          --lime: #a7e15f;
+          --card: rgba(10, 15, 24, 0.88);
+          --soft: rgba(255,255,255,0.045);
         }
 
         * { box-sizing: border-box; }
 
+        html, body, #root {
+          min-height: 100%;
+        }
+
         body {
           margin: 0;
+          color: var(--text);
           background:
-            radial-gradient(circle at top, #121212 0%, #0a0a0a 45%, #050505 100%);
-          color: white;
+            radial-gradient(circle at top, rgba(70,215,255,0.08), transparent 28%),
+            radial-gradient(circle at bottom, rgba(167,225,95,0.10), transparent 26%),
+            linear-gradient(180deg, #07090d 0%, #0b1018 45%, #05070a 100%);
+        }
+
+        body::before {
+          content: "";
+          position: fixed;
+          inset: 0;
+          pointer-events: none;
+          background:
+            linear-gradient(90deg, rgba(255,255,255,0.03) 1px, transparent 1px),
+            linear-gradient(180deg, rgba(255,255,255,0.02) 1px, transparent 1px);
+          background-size: 64px 64px;
+          opacity: 0.08;
         }
 
         button, input, textarea {
           font: inherit;
         }
 
+        button {
+          transition: transform 0.12s ease, filter 0.12s ease, background 0.18s ease, box-shadow 0.18s ease, opacity 0.18s ease;
+        }
+
+        button:active {
+          transform: scale(0.97);
+          filter: brightness(0.92);
+        }
+
         .appShell {
           min-height: 100vh;
-          padding: 16px;
+          padding: 18px;
+        }
+
+        .pageGrid {
+          max-width: 1220px;
+          margin: 0 auto;
+        }
+
+        .shellFade {
+          animation: pageFade 220ms ease;
+        }
+
+        @keyframes pageFade {
+          from { opacity: 0; transform: translateY(8px); }
+          to { opacity: 1; transform: translateY(0); }
         }
 
         .topbar {
-          max-width: 1180px;
-          margin: 0 auto 16px auto;
-          display: flex;
-          justify-content: space-between;
-          align-items: flex-start;
+          max-width: 1220px;
+          margin: 0 auto 18px auto;
+          display: grid;
+          grid-template-columns: 1fr auto;
+          align-items: start;
           gap: 12px;
         }
 
-        .titleBlock {
+        .logoCenterWrap {
+          display: flex;
+          justify-content: center;
+          align-items: center;
+          min-height: 88px;
+          position: relative;
+        }
+
+        .headerGlow {
+          position: absolute;
+          left: 0;
+          right: 0;
+          bottom: -4px;
+          height: 3px;
+          background: linear-gradient(90deg, transparent 0%, var(--green) 14%, var(--teal) 48%, #7c74ff 82%, transparent 100%);
+          box-shadow: 0 0 22px rgba(70,215,255,0.5);
+          border-radius: 999px;
+          opacity: 0.9;
+        }
+
+        .logoWrap {
+          display: inline-flex;
+          align-items: center;
+          gap: 14px;
+          position: relative;
+        }
+
+        .logoWrap.centered {
+          justify-content: center;
+        }
+
+        .logoWrap.small {
+          gap: 10px;
+        }
+
+        .logoIcon {
+          width: 68px;
+          height: 68px;
+          filter: drop-shadow(0 0 22px rgba(70,215,255,0.18));
+        }
+
+        .logoWrap.small .logoIcon {
+          width: 52px;
+          height: 52px;
+        }
+
+        .logoText {
           display: flex;
           flex-direction: column;
-          gap: 4px;
+          gap: 3px;
         }
 
-        .pageTitle {
-          margin: 0;
-          font-size: 30px;
-          font-weight: 800;
-          letter-spacing: -0.02em;
+        .logoTitle {
+          font-size: 52px;
+          line-height: 0.95;
+          font-weight: 900;
+          letter-spacing: -0.04em;
+          background: linear-gradient(90deg, var(--teal) 0%, #44d1d2 40%, var(--lime) 100%);
+          -webkit-background-clip: text;
+          background-clip: text;
+          color: transparent;
+          text-shadow: 0 0 20px rgba(70,215,255,0.14);
         }
 
-        .softText {
-          color: #9ca3af;
+        .logoWrap.small .logoTitle {
+          font-size: 34px;
         }
 
-        .errorText {
-          color: #f87171;
+        .logoSub {
           font-size: 13px;
-          margin-top: 12px;
+          letter-spacing: 0.25em;
+          font-weight: 800;
+          color: #f7fbff;
         }
 
-        .compactError {
-          margin-top: 8px;
+        .logoWrap.small .logoSub {
+          font-size: 11px;
         }
 
         .menuWrap {
           position: relative;
+          justify-self: end;
         }
 
         .menuBtn {
-          width: 48px;
-          height: 48px;
-          border-radius: 16px;
+          width: 50px;
+          height: 50px;
+          border-radius: 18px;
           border: 1px solid rgba(255,255,255,0.10);
           background: rgba(255,255,255,0.05);
           color: white;
           cursor: pointer;
           font-size: 22px;
-          backdrop-filter: blur(10px);
+          backdrop-filter: blur(12px);
+          box-shadow: inset 0 0 0 1px rgba(255,255,255,0.02);
         }
 
         .menuPanel {
           position: absolute;
           right: 0;
-          top: 56px;
-          width: 220px;
-          background: rgba(17,17,17,0.98);
+          top: 58px;
+          width: 230px;
+          background: rgba(13,17,24,0.98);
           border: 1px solid rgba(255,255,255,0.08);
           border-radius: 18px;
           overflow: hidden;
-          z-index: 20;
-          box-shadow: 0 16px 40px rgba(0,0,0,0.45);
+          z-index: 30;
+          box-shadow: 0 18px 45px rgba(0,0,0,0.48);
+          backdrop-filter: blur(18px);
         }
 
         .menuPanel button {
           width: 100%;
           text-align: left;
-          padding: 13px 14px;
+          padding: 13px 15px;
           background: transparent;
           border: none;
           color: white;
@@ -1268,40 +1574,55 @@ export default function App() {
           background: rgba(255,255,255,0.06);
         }
 
-        .pageGrid {
-          max-width: 1180px;
-          margin: 0 auto;
-        }
-
         .prettyCard {
-          background: linear-gradient(180deg, rgba(255,255,255,0.045), rgba(255,255,255,0.02));
+          position: relative;
+          background:
+            radial-gradient(circle at top left, rgba(70,215,255,0.08), transparent 24%),
+            radial-gradient(circle at bottom center, rgba(167,225,95,0.06), transparent 22%),
+            linear-gradient(180deg, rgba(13,17,24,0.92), rgba(7,10,15,0.94));
           border: 1px solid rgba(255,255,255,0.08);
-          border-radius: 24px;
-          padding: 18px;
-          box-shadow: 0 20px 50px rgba(0,0,0,0.35);
-          backdrop-filter: blur(8px);
+          border-radius: 28px;
+          padding: 20px;
+          box-shadow: 0 22px 50px rgba(0,0,0,0.34);
+          backdrop-filter: blur(10px);
+          overflow: hidden;
         }
 
-        .sectionHead {
+        .prettyCard::before {
+          content: "";
+          position: absolute;
+          inset: 0;
+          pointer-events: none;
+          background:
+            radial-gradient(circle at 10% 12%, rgba(70,215,255,0.10), transparent 14%),
+            radial-gradient(circle at 90% 86%, rgba(167,225,95,0.10), transparent 18%);
+          opacity: 0.5;
+        }
+
+        .pageHeader {
           display: flex;
           justify-content: space-between;
           align-items: center;
           gap: 12px;
-          margin-bottom: 14px;
+          margin-bottom: 8px;
+          position: relative;
+          z-index: 1;
         }
 
-        .sectionHead.tight {
-          align-items: flex-start;
-          flex-direction: column;
+        .pageHeader h2 {
+          margin: 0;
+          font-size: 20px;
         }
 
         .sectionBlock {
-          margin-top: 18px;
+          margin-top: 20px;
+          position: relative;
+          z-index: 1;
         }
 
-        .sectionBlock h3,
-        .prettyCard h2 {
-          margin: 0 0 10px 0;
+        .sectionBlock h3 {
+          margin: 0 0 12px 0;
+          font-size: 18px;
         }
 
         .greenBtn,
@@ -1312,65 +1633,84 @@ export default function App() {
           border-radius: 18px;
           padding: 10px 16px;
           cursor: pointer;
-          transition: 0.15s ease;
         }
 
         .greenBtn {
-          border: 1px solid rgba(34,197,94,0.22);
-          background: linear-gradient(180deg, #26cf60 0%, #1db954 100%);
+          border: 1px solid rgba(38,207,96,0.30);
+          background: linear-gradient(180deg, rgba(38,207,96,0.95) 0%, rgba(20,168,84,0.96) 100%);
           color: white;
-          font-weight: 700;
-          box-shadow: 0 10px 24px rgba(34,197,94,0.20);
+          font-weight: 800;
+          box-shadow: 0 10px 26px rgba(38,207,96,0.20), 0 0 18px rgba(38,207,96,0.12);
         }
 
         .greenBtn:hover {
           filter: brightness(1.05);
         }
 
-        .ghostBtn {
-          border: 1px solid rgba(255,255,255,0.10);
-          background: rgba(255,255,255,0.035);
-          color: white;
-          box-shadow: inset 0 0 0 1px rgba(255,255,255,0.03);
-        }
-
+        .ghostBtn,
         .filterBtn,
         .tabBtn,
         .radioBtn {
           border: 1px solid rgba(255,255,255,0.10);
           background: rgba(255,255,255,0.035);
-          color: #d6d6d6;
+          color: #edf2f7;
+          box-shadow: inset 0 0 0 1px rgba(255,255,255,0.02);
+        }
+
+        .ghostBtn:hover,
+        .filterBtn:hover,
+        .tabBtn:hover,
+        .radioBtn:hover {
+          background: rgba(255,255,255,0.06);
         }
 
         .filterBtn.active,
         .tabBtn.active,
         .radioBtn.active {
-          background: linear-gradient(180deg, #26cf60 0%, #1db954 100%);
+          background: linear-gradient(180deg, rgba(38,207,96,0.96) 0%, rgba(20,168,84,0.96) 100%);
+          border-color: rgba(38,207,96,0.32);
           color: white;
-          border-color: rgba(34,197,94,0.22);
+          box-shadow: 0 0 18px rgba(38,207,96,0.16);
         }
 
         .miniBtn {
-          min-width: 118px;
-          height: 52px;
+          min-width: 130px;
+          height: 54px;
           padding: 0 22px;
           border-radius: 22px;
-          font-size: 16px;
+          font-size: 17px;
+        }
+
+        .statusPill {
+          min-width: 118px;
+          height: 54px;
+          display: inline-flex;
+          align-items: center;
+          justify-content: center;
+          border: 1px solid rgba(255,255,255,0.12);
+          background: rgba(255,255,255,0.03);
+          border-radius: 24px;
+          padding: 0 18px;
+          font-size: 17px;
+          box-shadow: inset 0 0 0 1px rgba(255,255,255,0.02);
         }
 
         .full {
           width: 100%;
         }
 
-        .center {
-          text-align: center;
+        .filterRow,
+        .inlineBtns,
+        .radioRow,
+        .authToggleRow {
+          display: flex;
+          gap: 10px;
+          flex-wrap: wrap;
         }
 
-        .label {
-          display: block;
-          color: #9ca3af;
-          font-size: 12px;
-          margin-bottom: 4px;
+        .authToggleRow .tabBtn {
+          flex: 1 1 0;
+          text-align: center;
         }
 
         .modalBackdrop {
@@ -1387,36 +1727,38 @@ export default function App() {
         .modal {
           width: 100%;
           max-width: 560px;
-          max-height: min(86vh, 760px);
+          max-height: min(88vh, 820px);
           overflow-y: auto;
-          background: linear-gradient(180deg, #111111 0%, #0b0b0b 100%);
-          border: 1px solid rgba(255,255,255,0.10);
-          border-radius: 24px;
-          padding: 20px;
+          border-radius: 28px;
+          padding: 22px;
           position: relative;
-          box-shadow: 0 24px 60px rgba(0,0,0,0.5);
+          background:
+            radial-gradient(circle at top, rgba(70,215,255,0.08), transparent 28%),
+            radial-gradient(circle at bottom, rgba(167,225,95,0.08), transparent 26%),
+            linear-gradient(180deg, rgba(10,14,22,0.98) 0%, rgba(5,8,13,0.98) 100%);
+          border: 1px solid rgba(255,255,255,0.10);
+          box-shadow: 0 24px 60px rgba(0,0,0,0.58);
         }
 
         .authModal {
-          max-width: 460px;
-        }
-
-        .createBetModal {
           max-width: 500px;
         }
 
+        .createBetModal {
+          max-width: 540px;
+        }
+
         .modalTitle {
+          margin: 10px 0 10px 0;
+          font-size: 28px;
+          font-weight: 900;
+          text-align: center;
+        }
+
+        .modalCopy {
+          color: var(--muted);
+          text-align: center;
           margin: 0 0 12px 0;
-          font-size: 26px;
-          font-weight: 800;
-        }
-
-        .authCopy {
-          margin-bottom: 8px;
-        }
-
-        .authNoClose .closeX {
-          display: none;
         }
 
         .closeX {
@@ -1430,20 +1772,6 @@ export default function App() {
           cursor: pointer;
         }
 
-        .authToggleRow,
-        .filterRow,
-        .inlineBtns,
-        .radioRow {
-          display: flex;
-          gap: 10px;
-          flex-wrap: wrap;
-        }
-
-        .authToggleRow .tabBtn {
-          flex: 1 1 0;
-          text-align: center;
-        }
-
         .fieldGroup {
           margin-top: 12px;
         }
@@ -1451,14 +1779,15 @@ export default function App() {
         .fieldGroup label {
           display: block;
           margin-bottom: 6px;
-          color: #d4d4d8;
+          color: #d4dce6;
           font-size: 13px;
+          font-weight: 600;
         }
 
         input,
         textarea {
           width: 100%;
-          padding: 12px 14px;
+          padding: 13px 14px;
           border-radius: 16px;
           border: 1px solid rgba(255,255,255,0.10);
           background: rgba(255,255,255,0.035);
@@ -1466,9 +1795,21 @@ export default function App() {
           outline: none;
         }
 
+        input:focus,
+        textarea:focus {
+          border-color: rgba(70,215,255,0.35);
+          box-shadow: 0 0 0 3px rgba(70,215,255,0.10);
+        }
+
         textarea {
-          min-height: 90px;
+          min-height: 96px;
           resize: vertical;
+        }
+
+        .twoCol {
+          display: grid;
+          grid-template-columns: 1fr 1fr;
+          gap: 12px;
         }
 
         .moneyInput {
@@ -1482,20 +1823,14 @@ export default function App() {
         }
 
         .moneyInput span {
-          color: #22c55e;
+          color: var(--green);
           font-weight: 800;
         }
 
         .moneyInput input {
           border: none;
           background: transparent;
-          padding-left: 0;
-        }
-
-        .twoCol {
-          display: grid;
-          grid-template-columns: 1fr 1fr;
-          gap: 12px;
+          box-shadow: none;
         }
 
         .autocompleteBox {
@@ -1503,7 +1838,7 @@ export default function App() {
           border: 1px solid rgba(255,255,255,0.10);
           border-radius: 16px;
           overflow: hidden;
-          background: #111;
+          background: rgba(12,16,22,0.96);
         }
 
         .autocompleteItem {
@@ -1512,7 +1847,7 @@ export default function App() {
           background: transparent;
           color: white;
           text-align: left;
-          padding: 10px 12px;
+          padding: 11px 12px;
           cursor: pointer;
         }
 
@@ -1521,29 +1856,44 @@ export default function App() {
         }
 
         .smallPad {
-          padding: 10px 12px;
+          padding: 11px 12px;
         }
 
         .scrollList {
-          max-height: 520px;
-          overflow-y: auto;
           display: grid;
-          gap: 10px;
+          gap: 14px;
         }
 
         .betCard {
-          background: linear-gradient(180deg, rgba(255,255,255,0.03), rgba(255,255,255,0.018));
+          position: relative;
+          overflow: hidden;
+          background:
+            radial-gradient(circle at top center, rgba(70,215,255,0.07), transparent 30%),
+            linear-gradient(180deg, rgba(16,21,30,0.93) 0%, rgba(10,14,20,0.94) 100%);
           border: 1px solid rgba(255,255,255,0.08);
-          border-radius: 28px;
-          padding: 18px 22px;
+          border-radius: 30px;
+          padding: 20px 24px;
           box-shadow: inset 0 0 0 1px rgba(255,255,255,0.015);
         }
 
-        .compact {
-          padding: 18px 22px;
+        .betGlow {
+          position: absolute;
+          inset: -1px;
+          pointer-events: none;
+          border-radius: inherit;
+          background:
+            linear-gradient(90deg, rgba(38,207,96,0.18), rgba(70,215,255,0.14), rgba(124,116,255,0.14));
+          opacity: 0.45;
+          filter: blur(18px);
+        }
+
+        .skeletonCard .betGlow {
+          display: none;
         }
 
         .betRowTop {
+          position: relative;
+          z-index: 1;
           display: grid;
           grid-template-columns: minmax(0, 1fr) auto;
           gap: 16px;
@@ -1552,56 +1902,44 @@ export default function App() {
 
         .betLeft {
           min-width: 0;
-          text-align: left;
         }
 
         .betRight {
           display: flex;
-          align-items: center;
           justify-content: flex-end;
-          min-width: fit-content;
+          align-items: center;
         }
 
         .betTitle {
-          font-weight: 800;
-          font-size: 18px;
-          line-height: 1.22;
+          font-weight: 900;
+          font-size: 19px;
+          line-height: 1.2;
           letter-spacing: -0.01em;
         }
 
         .betSub {
-          color: #98a1ae;
+          color: var(--muted);
           font-size: 13px;
-          margin-top: 6px;
+          margin-top: 7px;
         }
 
         .betRowBottom {
+          position: relative;
+          z-index: 1;
           display: flex;
           flex-wrap: wrap;
-          gap: 10px 28px;
-          color: #d4d4d8;
+          gap: 10px 30px;
+          color: #e1e7ee;
           font-size: 14px;
           margin-top: 14px;
         }
 
         .compactMeta {
-          margin-top: 10px;
+          position: relative;
+          z-index: 1;
+          margin-top: 11px;
           font-size: 13px;
-        }
-
-        .statusPill {
-          min-width: 110px;
-          height: 52px;
-          display: inline-flex;
-          align-items: center;
-          justify-content: center;
-          border: 1px solid rgba(255,255,255,0.10);
-          background: rgba(255,255,255,0.03);
-          border-radius: 24px;
-          padding: 0 18px;
-          font-size: 16px;
-          white-space: nowrap;
-          box-shadow: inset 0 0 0 1px rgba(255,255,255,0.02);
+          color: var(--muted);
         }
 
         .tableWrap {
@@ -1616,44 +1954,44 @@ export default function App() {
         th,
         td {
           text-align: left;
-          padding: 10px 12px;
+          padding: 13px 12px;
           border-bottom: 1px solid rgba(255,255,255,0.08);
         }
 
         th {
-          color: #9ca3af;
+          color: var(--muted);
           font-size: 13px;
         }
 
         .greenText {
-          color: #22c55e;
-          font-weight: 700;
+          color: var(--green);
+          font-weight: 800;
         }
 
         .redText {
-          color: #ef4444;
-          font-weight: 700;
+          color: #ff6b6b;
+          font-weight: 800;
         }
 
         .emptyState,
         .emptyCell {
-          color: #8f8f8f;
+          color: #8f98a4;
           padding: 18px 6px;
           text-align: center;
         }
 
-        .ctaSpacing {
-          margin-top: 18px;
+        .settleCtaCell {
+          width: 220px;
         }
 
-        .authShell {
-          position: relative;
+        .settleInlineBtn {
+          min-width: 170px;
         }
 
         .skeleton {
           position: relative;
           overflow: hidden;
-          border-radius: 14px;
+          border-radius: 16px;
           background: rgba(255,255,255,0.07);
         }
 
@@ -1666,34 +2004,41 @@ export default function App() {
             90deg,
             rgba(255,255,255,0) 0%,
             rgba(255,255,255,0.08) 45%,
-            rgba(255,255,255,0.18) 50%,
+            rgba(255,255,255,0.20) 50%,
             rgba(255,255,255,0.08) 55%,
             rgba(255,255,255,0) 100%
           );
           animation: skeletonSweep 1.4s ease-in-out infinite;
         }
 
+        .skeletonLogo {
+          width: 240px;
+          height: 72px;
+          margin: 0 auto 10px auto;
+        }
+
         .skeletonTitle {
-          width: 180px;
+          width: 210px;
           height: 28px;
-          margin-bottom: 8px;
+          margin: 0 auto 8px auto;
         }
 
         .skeletonSub {
-          width: 130px;
-          height: 14px;
+          width: 180px;
+          height: 16px;
+          margin: 0 auto;
         }
 
         .skeletonLineLg {
-          width: 72%;
+          width: 74%;
           height: 18px;
-          margin-bottom: 8px;
+          margin-bottom: 10px;
         }
 
         .skeletonLineSm {
-          width: 44%;
+          width: 46%;
           height: 14px;
-          margin-bottom: 10px;
+          margin-bottom: 12px;
         }
 
         .skeletonRow {
@@ -1704,45 +2049,50 @@ export default function App() {
 
         .skeletonBox {
           width: 100%;
-          height: 40px;
+          height: 46px;
         }
 
         @keyframes skeletonSweep {
-          100% {
-            transform: translateX(100%);
+          100% { transform: translateX(100%); }
+        }
+
+        .msgOk {
+          color: #b3f5c9;
+          margin-top: 12px;
+          font-size: 13px;
+        }
+
+        .msgErr {
+          color: #ff8f8f;
+          margin-top: 12px;
+          font-size: 13px;
+        }
+
+        @media (max-width: 900px) {
+          .logoTitle {
+            font-size: 40px;
           }
         }
 
-        @media (max-width: 700px) {
+        @media (max-width: 760px) {
           .appShell {
             padding: 12px;
+          }
+
+          .topbar {
+            grid-template-columns: 1fr auto;
           }
 
           .twoCol {
             grid-template-columns: 1fr;
           }
 
-          .sectionHead {
+          .pageHeader {
             flex-direction: column;
             align-items: stretch;
           }
 
-          .pageTitle {
-            font-size: 24px;
-          }
-
-          .prettyCard {
-            padding: 14px;
-            border-radius: 20px;
-          }
-
-          .modal {
-            padding: 18px;
-            border-radius: 20px;
-          }
-
-          .betCard,
-          .compact {
+          .betCard {
             padding: 16px;
             border-radius: 24px;
           }
@@ -1763,27 +2113,42 @@ export default function App() {
 
           .miniBtn,
           .statusPill {
-            min-width: 102px;
+            min-width: 110px;
             height: 48px;
             font-size: 15px;
+          }
+
+          .logoTitle {
+            font-size: 32px;
+          }
+
+          .logoIcon {
+            width: 54px;
+            height: 54px;
+          }
+
+          .logoSub {
+            font-size: 11px;
           }
         }
       `}</style>
 
       <div className="appShell">
         {showLockedState ? (
-          <div className="authShell">
+          <div className="shellFade">
             {renderSkeletonScreen()}
 
             {!authLoading && !session && (
               <div className="modalBackdrop">
-                <div className="modal authModal authNoClose">
+                <div className="modal authModal">
+                  <SettleUpLogo centered small />
+
                   <h1 className="modalTitle">
                     {authMode === "signup" ? "Create account" : "Sign In"}
                   </h1>
 
-                  <p className="softText center authCopy">
-                    Create an account or sign in to access Bet Tracker.
+                  <p className="modalCopy">
+                    Create an account or sign in to access SettleUp Bet Tracker.
                   </p>
 
                   <div className="authToggleRow">
@@ -1817,6 +2182,7 @@ export default function App() {
                           placeholder="Enter username"
                         />
                       </div>
+
                       <div className="fieldGroup">
                         <label>Email</label>
                         <input
@@ -1825,6 +2191,7 @@ export default function App() {
                           placeholder="Enter email"
                         />
                       </div>
+
                       <div className="fieldGroup">
                         <label>Password</label>
                         <input
@@ -1834,8 +2201,10 @@ export default function App() {
                           placeholder="Enter password"
                         />
                       </div>
-                      {authError && <div className="errorText">{authError}</div>}
-                      <button className="greenBtn full ctaSpacing" onClick={handleSignup}>
+
+                      {authError && <div className="msgErr">{authError}</div>}
+
+                      <button className="greenBtn full" style={{ marginTop: 18 }} onClick={handleSignup}>
                         Create Account
                       </button>
                     </>
@@ -1849,6 +2218,7 @@ export default function App() {
                           placeholder="Enter email"
                         />
                       </div>
+
                       <div className="fieldGroup">
                         <label>Password</label>
                         <input
@@ -1858,8 +2228,10 @@ export default function App() {
                           placeholder="Enter password"
                         />
                       </div>
-                      {authError && <div className="errorText">{authError}</div>}
-                      <button className="greenBtn full ctaSpacing" onClick={handleLogin}>
+
+                      {authError && <div className="msgErr">{authError}</div>}
+
+                      <button className="greenBtn full" style={{ marginTop: 18 }} onClick={handleLogin}>
                         Sign In
                       </button>
                     </>
@@ -1869,13 +2241,11 @@ export default function App() {
             )}
           </div>
         ) : (
-          <>
+          <div className={`shellFade ${pageLoading ? "pageLoading" : ""}`}>
             <header className="topbar">
-              <div className="titleBlock">
-                <h1 className="pageTitle">Bet Tracker</h1>
-                <div className="softText">
-                  Logged in as {currentUser?.name || "User"}
-                </div>
+              <div className="logoCenterWrap">
+                <SettleUpLogo centered />
+                <div className="headerGlow" />
               </div>
 
               <div className="menuWrap" onClick={(e) => e.stopPropagation()}>
@@ -1885,31 +2255,12 @@ export default function App() {
 
                 {menuOpen && (
                   <div className="menuPanel">
-                    <button
-                      onClick={() => {
-                        setPage("home");
-                        setMenuOpen(false);
-                      }}
-                    >
-                      Home
-                    </button>
-                    <button
-                      onClick={() => {
-                        setPage("mybets");
-                        setMenuOpen(false);
-                      }}
-                    >
-                      My Bets
-                    </button>
-                    <button
-                      onClick={() => {
-                        setPage("history");
-                        setMenuOpen(false);
-                      }}
-                    >
-                      Bet History & Stats
-                    </button>
-                    <button onClick={handleLogout}>Log Out</button>
+                    <button onClick={() => goToPage("home")}>Home</button>
+                    <button onClick={() => goToPage("account")}>My Account</button>
+                    <button onClick={() => goToPage("mybets")}>My Bets</button>
+                    <button onClick={() => goToPage("settleup")}>Settle Up</button>
+                    <button onClick={() => goToPage("history")}>Bet History</button>
+                    <button onClick={handleLogout}>Logout</button>
                   </div>
                 )}
               </div>
@@ -1928,11 +2279,12 @@ export default function App() {
                     ×
                   </button>
 
+                  <SettleUpLogo centered small />
                   <h2 className="modalTitle">Create a Bet</h2>
 
                   <div className="fieldGroup">
                     <label>Proposed By</label>
-                    <input value={currentUser?.name || ""} disabled />
+                    <input value={currentUser?.username || ""} disabled />
                   </div>
 
                   <div className="fieldGroup">
@@ -1955,14 +2307,14 @@ export default function App() {
                               className="autocompleteItem"
                               onClick={() => {
                                 setSelectedOpponentId(user.id);
-                                setOpponentSearch(user.name);
+                                setOpponentSearch(user.username);
                               }}
                             >
-                              {user.name}
+                              {user.username}
                             </button>
                           ))
                         ) : (
-                          <div className="smallPad softText">
+                          <div className="smallPad" style={{ color: "#98a1ae" }}>
                             No dropdown match. Exact username text will still work.
                           </div>
                         )}
@@ -2010,7 +2362,6 @@ export default function App() {
                             placeholder="Team / side you are taking"
                           />
                         </div>
-
                         <div className="fieldGroup">
                           <label>Against</label>
                           <input
@@ -2062,7 +2413,6 @@ export default function App() {
                               </button>
                             </div>
                           </div>
-
                           <div className="fieldGroup">
                             <label>Number</label>
                             <input
@@ -2102,7 +2452,6 @@ export default function App() {
                               </button>
                             </div>
                           </div>
-
                           <div className="fieldGroup">
                             <label>{sidePick === "ml" ? "Line" : "Spread"}</label>
                             <input
@@ -2133,7 +2482,6 @@ export default function App() {
                         />
                       </div>
                     </div>
-
                     <div className="fieldGroup">
                       <label>Win Amount</label>
                       <div className="moneyInput">
@@ -2149,19 +2497,19 @@ export default function App() {
                     </div>
                   </div>
 
-                  {createBetError && <div className="errorText">{createBetError}</div>}
+                  {createBetError && <div className="msgErr">{createBetError}</div>}
 
-                  <button className="greenBtn full ctaSpacing" onClick={handleCreateBet}>
+                  <button className="greenBtn full" style={{ marginTop: 18 }} onClick={handleCreateBet}>
                     Propose Bet
                   </button>
                 </div>
               </div>
             )}
 
-            {page === "home" && (
-              <main className="pageGrid">
+            <main className="pageGrid shellFade">
+              {page === "home" && (
                 <section className="prettyCard">
-                  <div className="sectionHead">
+                  <div className="pageHeader">
                     <h2>Home</h2>
                     <button className="greenBtn" onClick={() => setShowCreateBetModal(true)}>
                       Create a Bet
@@ -2179,21 +2527,20 @@ export default function App() {
                   </div>
 
                   <div className="sectionBlock">
-                    <div className="sectionHead tight">
-                      <h3>Total Win/Loss Results</h3>
-                      <div className="filterRow">
-                        {filters.map((filter) => (
-                          <button
-                            key={filter}
-                            className={
-                              leaderboardFilter === filter ? "filterBtn active" : "filterBtn"
-                            }
-                            onClick={() => setLeaderboardFilter(filter)}
-                          >
-                            {filter}
-                          </button>
-                        ))}
-                      </div>
+                    <div className="pageHeader" style={{ marginBottom: 10 }}>
+                      <h2>Total Win/Loss Results</h2>
+                    </div>
+
+                    <div className="filterRow" style={{ marginBottom: 14 }}>
+                      {filters.map((filter) => (
+                        <button
+                          key={filter}
+                          className={leaderboardFilter === filter ? "filterBtn active" : "filterBtn"}
+                          onClick={() => setLeaderboardFilter(filter)}
+                        >
+                          {filter}
+                        </button>
+                      ))}
                     </div>
 
                     <div className="tableWrap">
@@ -2205,26 +2552,90 @@ export default function App() {
                           </tr>
                         </thead>
                         <tbody>
-                          {leaderboard.map((row) => (
-                            <tr key={row.userId}>
-                              <td>{row.name}</td>
-                              <td className={row.net >= 0 ? "greenText" : "redText"}>
-                                {currency(row.net)}
+                          {leaderboard.length ? (
+                            leaderboard.map((row) => (
+                              <tr key={row.userId}>
+                                <td>{row.username}</td>
+                                <td className={row.net >= 0 ? "greenText" : "redText"}>
+                                  {currency(row.net)}
+                                </td>
+                              </tr>
+                            ))
+                          ) : (
+                            <tr>
+                              <td colSpan="2" className="emptyCell">
+                                No positive or negative balances in this filter
                               </td>
                             </tr>
-                          ))}
+                          )}
                         </tbody>
                       </table>
                     </div>
                   </div>
                 </section>
-              </main>
-            )}
+              )}
 
-            {page === "mybets" && (
-              <main className="pageGrid">
+              {page === "account" && (
                 <section className="prettyCard">
-                  <h2>My Bets</h2>
+                  <div className="pageHeader">
+                    <h2>My Account</h2>
+                  </div>
+
+                  <div className="twoCol">
+                    <div className="fieldGroup">
+                      <label>Username</label>
+                      <input
+                        value={accountUsername}
+                        onChange={(e) => setAccountUsername(e.target.value)}
+                      />
+                    </div>
+
+                    <div className="fieldGroup">
+                      <label>Email</label>
+                      <input
+                        value={accountEmail}
+                        onChange={(e) => setAccountEmail(e.target.value)}
+                      />
+                    </div>
+                  </div>
+
+                  <div className="twoCol">
+                    <div className="fieldGroup">
+                      <label>First Name</label>
+                      <input
+                        value={accountFirstName}
+                        onChange={(e) => setAccountFirstName(e.target.value)}
+                      />
+                    </div>
+
+                    <div className="fieldGroup">
+                      <label>Last Name</label>
+                      <input
+                        value={accountLastName}
+                        onChange={(e) => setAccountLastName(e.target.value)}
+                      />
+                    </div>
+                  </div>
+
+                  {accountError && <div className="msgErr">{accountError}</div>}
+                  {accountMessage && <div className="msgOk">{accountMessage}</div>}
+
+                  <button
+                    className="greenBtn"
+                    style={{ marginTop: 18 }}
+                    onClick={handleSaveAccount}
+                    disabled={savingAccount}
+                  >
+                    {savingAccount ? "Saving..." : "Save Account"}
+                  </button>
+                </section>
+              )}
+
+              {page === "mybets" && (
+                <section className="prettyCard">
+                  <div className="pageHeader">
+                    <h2>My Bets</h2>
+                  </div>
 
                   <div className="sectionBlock">
                     <h3>All Bets You Proposed</h3>
@@ -2262,13 +2673,13 @@ export default function App() {
                     </div>
                   </div>
                 </section>
-              </main>
-            )}
+              )}
 
-            {page === "history" && (
-              <main className="pageGrid">
+              {page === "settleup" && (
                 <section className="prettyCard">
-                  <h2>Bet History & Stats</h2>
+                  <div className="pageHeader">
+                    <h2>Settle Up</h2>
+                  </div>
 
                   <div className="sectionBlock">
                     <h3>Bet Status</h3>
@@ -2277,7 +2688,7 @@ export default function App() {
                         renderBetCard(bet, { showPayment: true })
                       )}
                       {!unpaidGradedBets.length && (
-                        <div className="emptyState">No graded unpaid bets right now.</div>
+                        <div className="emptyState">No unpaid graded bets right now.</div>
                       )}
                     </div>
                   </div>
@@ -2290,22 +2701,31 @@ export default function App() {
                           <tr>
                             <th>Username</th>
                             <th>Balance</th>
+                            <th className="settleCtaCell">Action</th>
                           </tr>
                         </thead>
                         <tbody>
                           {outstanding.length ? (
                             outstanding.map((row) => (
                               <tr key={row.userId}>
-                                <td>{row.name}</td>
+                                <td>{row.username}</td>
                                 <td className={row.net >= 0 ? "greenText" : "redText"}>
                                   {currency(row.net)}
+                                </td>
+                                <td className="settleCtaCell">
+                                  <button
+                                    className="greenBtn settleInlineBtn"
+                                    onClick={() => settleAllWithUser(row.userId)}
+                                  >
+                                    {row.net < 0 ? "Paid Up in Full!" : "Got Paid in Full!"}
+                                  </button>
                                 </td>
                               </tr>
                             ))
                           ) : (
                             <tr>
-                              <td colSpan="2" className="emptyCell">
-                                No outstanding balances
+                              <td colSpan="3" className="emptyCell">
+                                No balances to settle
                               </td>
                             </tr>
                           )}
@@ -2315,21 +2735,18 @@ export default function App() {
                   </div>
 
                   <div className="sectionBlock">
-                    <div className="sectionHead tight">
-                      <h3>Bet History</h3>
-                      <div className="filterRow">
-                        {filters.map((filter) => (
-                          <button
-                            key={filter}
-                            className={
-                              historyFilter === filter ? "filterBtn active" : "filterBtn"
-                            }
-                            onClick={() => setHistoryFilter(filter)}
-                          >
-                            {filter}
-                          </button>
-                        ))}
-                      </div>
+                    <h3>Head to Head Results</h3>
+
+                    <div className="filterRow" style={{ marginBottom: 14 }}>
+                      {filters.map((filter) => (
+                        <button
+                          key={filter}
+                          className={historyFilter === filter ? "filterBtn active" : "filterBtn"}
+                          onClick={() => setHistoryFilter(filter)}
+                        >
+                          {filter}
+                        </button>
+                      ))}
                     </div>
 
                     <div className="tableWrap">
@@ -2344,7 +2761,7 @@ export default function App() {
                           {headToHead.length ? (
                             headToHead.map((row) => (
                               <tr key={row.userId}>
-                                <td>{row.name}</td>
+                                <td>{row.username}</td>
                                 <td className={row.net >= 0 ? "greenText" : "redText"}>
                                   {currency(row.net)}
                                 </td>
@@ -2361,20 +2778,25 @@ export default function App() {
                       </table>
                     </div>
                   </div>
+                </section>
+              )}
 
-                  <div className="sectionBlock">
-                    <h3>Past Bets</h3>
-                    <div className="scrollList">
-                      {paidHistory.slice(0, 14).map((bet) => renderBetCard(bet))}
-                      {!paidHistory.length && (
-                        <div className="emptyState">No fully settled bets yet.</div>
-                      )}
-                    </div>
+              {page === "history" && (
+                <section className="prettyCard">
+                  <div className="pageHeader">
+                    <h2>Bet History</h2>
+                  </div>
+
+                  <div className="scrollList">
+                    {paidHistory.slice(0, 20).map((bet) => renderBetCard(bet))}
+                    {!paidHistory.length && (
+                      <div className="emptyState">No settled bets yet.</div>
+                    )}
                   </div>
                 </section>
-              </main>
-            )}
-          </>
+              )}
+            </main>
+          </div>
         )}
       </div>
     </>
