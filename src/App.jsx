@@ -6,11 +6,13 @@ const TODAY_BOARD_CACHE_KEY = "settleup_today_board_cache_v1";
 
 function currency(value) {
   const num = Number(value || 0);
-  const abs = Math.abs(num).toLocaleString(undefined, {
-    minimumFractionDigits: Number.isInteger(abs) ? 0 : 2,
+  const absoluteValue = Math.abs(num);
+  const formatted = absoluteValue.toLocaleString(undefined, {
+    minimumFractionDigits: Number.isInteger(absoluteValue) ? 0 : 2,
     maximumFractionDigits: 2,
   });
-  return num < 0 ? `-$${abs}` : `$${abs}`;
+
+  return num < 0 ? `-$${formatted}` : `$${formatted}`;
 }
 
 function getNow() {
@@ -168,7 +170,10 @@ function parseBetPayload(text) {
   if (parsed && parsed.version === 2 && parsed.kind) {
     return {
       ...parsed,
-      odds: parsed.kind === "classic" ? formatOddsForDisplay(parsed.odds || "+100") : null,
+      odds:
+        parsed.kind === "classic"
+          ? formatOddsForDisplay(parsed.odds || "+100")
+          : null,
     };
   }
 
@@ -399,6 +404,91 @@ function mapDbBetToUi(bet) {
   };
 }
 
+function getTeamLogoFromItem(item, side) {
+  const keys =
+    side === "home"
+      ? [
+          "home_logo",
+          "homeLogo",
+          "home_team_logo",
+          "homeTeamLogo",
+          "logo_home",
+          "home_logo_url",
+          "homeLogoUrl",
+        ]
+      : [
+          "away_logo",
+          "awayLogo",
+          "away_team_logo",
+          "awayTeamLogo",
+          "logo_away",
+          "away_logo_url",
+          "awayLogoUrl",
+        ];
+
+  for (const key of keys) {
+    if (item?.[key]) return item[key];
+  }
+
+  if (Array.isArray(item?.teams)) {
+    const targetName =
+      side === "home"
+        ? item.home_team || item.homeTeam
+        : item.away_team || item.awayTeam;
+
+    const match = item.teams.find(
+      (team) =>
+        team?.name === targetName ||
+        team?.team === targetName ||
+        team?.display_name === targetName
+    );
+
+    if (match?.logo) return match.logo;
+    if (match?.logoUrl) return match.logoUrl;
+    if (match?.image) return match.image;
+  }
+
+  return "";
+}
+
+function formatBoardTime(commenceTime) {
+  if (!commenceTime) return "";
+
+  const date = new Date(commenceTime);
+  if (Number.isNaN(date.getTime())) return "";
+
+  return date.toLocaleString([], {
+    weekday: "short",
+    hour: "numeric",
+    minute: "2-digit",
+  });
+}
+
+function getInitials(name) {
+  return String(name || "")
+    .split(" ")
+    .filter(Boolean)
+    .slice(0, 2)
+    .map((part) => part[0]?.toUpperCase() || "")
+    .join("");
+}
+
+function TeamLogo({ src, name, large = false }) {
+  if (src) {
+    return (
+      <div className={`teamLogoWrap ${large ? "large" : ""}`}>
+        <img className="teamLogo" src={src} alt={name} />
+      </div>
+    );
+  }
+
+  return (
+    <div className={`teamLogoWrap fallback ${large ? "large" : ""}`}>
+      <span>{getInitials(name)}</span>
+    </div>
+  );
+}
+
 function SettleUpLogo({ centered = false, small = false }) {
   return (
     <div className={`logoWrap ${centered ? "centered" : ""} ${small ? "small" : ""}`}>
@@ -447,6 +537,176 @@ function SettleUpLogo({ centered = false, small = false }) {
   );
 }
 
+function firstDefined(...values) {
+  for (const value of values) {
+    if (value !== undefined && value !== null && value !== "") return value;
+  }
+  return "";
+}
+
+function toNumberOrBlank(value) {
+  const num = Number(value);
+  return Number.isFinite(num) ? num : "";
+}
+
+function formatLineNumber(value) {
+  const num = Number(value);
+  if (!Number.isFinite(num)) return "";
+  return String(Math.abs(num)).replace(/\.0$/, "");
+}
+
+function isCollegeBasketballItem(item) {
+  const joined = [
+    item?.sport_key,
+    item?.sportKey,
+    item?.sport_title,
+    item?.sportTitle,
+    item?.league,
+    item?.sport,
+  ]
+    .filter(Boolean)
+    .join(" ")
+    .toLowerCase();
+
+  return (
+    joined.includes("basketball_ncaab") ||
+    joined.includes("college basketball") ||
+    joined.includes("ncaab") ||
+    joined.includes("ncaa basketball")
+  );
+}
+
+function extractMoneyline(item) {
+  const homeTeam = item.home_team || item.homeTeam;
+  const awayTeam = item.away_team || item.awayTeam;
+
+  const h2hMarket = Array.isArray(item?.bookmakers)
+    ? item.bookmakers[0]?.markets?.find((m) => m.key === "h2h")
+    : null;
+
+  const home = firstDefined(
+    item?.home_moneyline,
+    item?.homeMoneyline,
+    item?.ml_home,
+    item?.home_ml,
+    item?.moneyline_home,
+    item?.moneylineHome,
+    item?.odds?.moneyline?.home,
+    h2hMarket?.outcomes?.find((o) => o.name === homeTeam)?.price
+  );
+
+  const away = firstDefined(
+    item?.away_moneyline,
+    item?.awayMoneyline,
+    item?.ml_away,
+    item?.away_ml,
+    item?.moneyline_away,
+    item?.moneylineAway,
+    item?.odds?.moneyline?.away,
+    h2hMarket?.outcomes?.find((o) => o.name === awayTeam)?.price
+  );
+
+  return {
+    home: formatOddsForDisplay(home || "+100"),
+    away: formatOddsForDisplay(away || "+100"),
+  };
+}
+
+function extractSpread(item) {
+  const homeTeam = item.home_team || item.homeTeam;
+  const awayTeam = item.away_team || item.awayTeam;
+
+  const spreadMarket = Array.isArray(item?.bookmakers)
+    ? item.bookmakers[0]?.markets?.find((m) => m.key === "spreads")
+    : null;
+
+  let homePoint = toNumberOrBlank(
+    firstDefined(
+      item?.home_spread,
+      item?.homeSpread,
+      item?.spread_home,
+      item?.spreadHome,
+      item?.home_spread_points,
+      item?.homeSpreadPoints,
+      item?.odds?.spread?.home,
+      spreadMarket?.outcomes?.find((o) => o.name === homeTeam)?.point
+    )
+  );
+
+  let awayPoint = toNumberOrBlank(
+    firstDefined(
+      item?.away_spread,
+      item?.awaySpread,
+      item?.spread_away,
+      item?.spreadAway,
+      item?.away_spread_points,
+      item?.awaySpreadPoints,
+      item?.odds?.spread?.away,
+      spreadMarket?.outcomes?.find((o) => o.name === awayTeam)?.point
+    )
+  );
+
+  if (homePoint === "" && awayPoint !== "") homePoint = awayPoint * -1;
+  if (awayPoint === "" && homePoint !== "") awayPoint = homePoint * -1;
+
+  return {
+    home: {
+      sidePick: Number(homePoint) >= 0 ? "plus" : "minus",
+      sideNumber: formatLineNumber(homePoint),
+      odds: "+100",
+    },
+    away: {
+      sidePick: Number(awayPoint) >= 0 ? "plus" : "minus",
+      sideNumber: formatLineNumber(awayPoint),
+      odds: "+100",
+    },
+  };
+}
+
+function extractTotal(item) {
+  const totalMarket = Array.isArray(item?.bookmakers)
+    ? item.bookmakers[0]?.markets?.find((m) => m.key === "totals")
+    : null;
+
+  const point = firstDefined(
+    item?.total,
+    item?.total_points,
+    item?.totalPoints,
+    item?.over_under,
+    item?.overUnder,
+    item?.odds?.total?.number,
+    totalMarket?.outcomes?.[0]?.point
+  );
+
+  return {
+    number: point === "" ? "" : String(point),
+    overOdds: "+100",
+    underOdds: "+100",
+  };
+}
+
+function normalizeBoardGames(items) {
+  return items
+    .filter((item) => isCollegeBasketballItem(item))
+    .map((item, index) => {
+      const homeTeam = item.home_team || item.homeTeam || "Home";
+      const awayTeam = item.away_team || item.awayTeam || "Away";
+
+      return {
+        id: item.id || `${homeTeam}-${awayTeam}-${index}`,
+        homeTeam,
+        awayTeam,
+        homeLogo: getTeamLogoFromItem(item, "home"),
+        awayLogo: getTeamLogoFromItem(item, "away"),
+        sportTitle: item.sport_title || item.sportTitle || "College Basketball",
+        commenceTime: item.commence_time || item.commenceTime || "",
+        moneyline: extractMoneyline(item),
+        spread: extractSpread(item),
+        total: extractTotal(item),
+      };
+    });
+}
+
 export default function App() {
   const [users, setUsers] = useState([]);
   const [bets, setBets] = useState([]);
@@ -471,10 +731,14 @@ export default function App() {
   const [loginPassword, setLoginPassword] = useState("");
 
   const [showCreateBetModal, setShowCreateBetModal] = useState(false);
+  const [showBoardBetModal, setShowBoardBetModal] = useState(false);
   const [createBetError, setCreateBetError] = useState("");
 
   const [opponentSearch, setOpponentSearch] = useState("");
   const [selectedOpponentId, setSelectedOpponentId] = useState("");
+
+  const [boardOpponentSearch, setBoardOpponentSearch] = useState("");
+  const [boardSelectedOpponentId, setBoardSelectedOpponentId] = useState("");
 
   const [betMode, setBetMode] = useState("classic");
   const [customBetDetails, setCustomBetDetails] = useState("");
@@ -488,8 +752,22 @@ export default function App() {
   const [sideNumber, setSideNumber] = useState("");
   const [classicOdds, setClassicOdds] = useState("+100");
 
+  const [boardTakingTeam, setBoardTakingTeam] = useState("");
+  const [boardAgainstTeam, setBoardAgainstTeam] = useState("");
+  const [boardMarketType, setBoardMarketType] = useState("side");
+  const [boardTotalPick, setBoardTotalPick] = useState("over");
+  const [boardTotalNumber, setBoardTotalNumber] = useState("");
+  const [boardSidePick, setBoardSidePick] = useState("ml");
+  const [boardSideNumber, setBoardSideNumber] = useState("");
+  const [boardClassicOdds, setBoardClassicOdds] = useState("+100");
+  const [boardTakingLogo, setBoardTakingLogo] = useState("");
+  const [boardAgainstLogo, setBoardAgainstLogo] = useState("");
+
   const [betAmount, setBetAmount] = useState("");
   const [winAmount, setWinAmount] = useState("");
+
+  const [boardBetAmount, setBoardBetAmount] = useState("");
+  const [boardWinAmount, setBoardWinAmount] = useState("");
 
   const [leaderboardFilter, setLeaderboardFilter] = useState("All Time");
   const [historyFilter, setHistoryFilter] = useState("All Time");
@@ -506,6 +784,7 @@ export default function App() {
   const [todayBoard, setTodayBoard] = useState([]);
   const [todayBoardLoading, setTodayBoardLoading] = useState(false);
   const [todayBoardError, setTodayBoardError] = useState("");
+  const [boardHasAnyMissingLogos, setBoardHasAnyMissingLogos] = useState(false);
 
   const authUser = session?.user || null;
 
@@ -559,6 +838,7 @@ export default function App() {
       setMenuOpen(false);
       if (!nextSession) {
         setShowCreateBetModal(false);
+        setShowBoardBetModal(false);
         setPage("home");
       }
     });
@@ -577,11 +857,15 @@ export default function App() {
     setWinAmount(calculateWinAmount(betAmount, classicOdds));
   }, [betMode, betAmount, classicOdds]);
 
+    useEffect(() => {
+    setBoardWinAmount(calculateWinAmount(boardBetAmount, boardClassicOdds));
+  }, [boardBetAmount, boardClassicOdds]);
+
   useEffect(() => {
     if (betMode !== "classic") return;
 
     if (marketType === "total") {
-      if (!classicOdds) setClassicOdds("-110");
+      if (!classicOdds) setClassicOdds("+100");
       return;
     }
 
@@ -590,16 +874,28 @@ export default function App() {
       return;
     }
 
-    if (!classicOdds || classicOdds === "+100") {
-      setClassicOdds("-110");
+    if (!classicOdds) {
+      setClassicOdds("+100");
     }
   }, [betMode, marketType, sidePick, classicOdds]);
 
   useEffect(() => {
+    if (boardMarketType === "total") {
+      if (boardClassicOdds !== "+100") setBoardClassicOdds("+100");
+      return;
+    }
+
+    if (boardSidePick !== "ml") {
+      if (boardClassicOdds !== "+100") setBoardClassicOdds("+100");
+    }
+  }, [boardMarketType, boardSidePick, boardClassicOdds]);
+
+     useEffect(() => {
     const configuredBoardUrl = import.meta.env.VITE_COMBINED_ODDS_ENDPOINT;
 
     if (!configuredBoardUrl) {
       setTodayBoard([]);
+      setBoardHasAnyMissingLogos(false);
       return;
     }
 
@@ -607,7 +903,11 @@ export default function App() {
     const cached = safeJsonParse(localStorage.getItem(TODAY_BOARD_CACHE_KEY));
 
     if (cached?.date === todayKey && Array.isArray(cached?.items)) {
-      setTodayBoard(cached.items);
+      const normalized = normalizeBoardGames(cached.items);
+      setTodayBoard(normalized);
+      setBoardHasAnyMissingLogos(
+        normalized.some((game) => !game.homeLogo || !game.awayLogo)
+      );
       return;
     }
 
@@ -620,15 +920,27 @@ export default function App() {
         if (!response.ok) throw new Error("Could not load board");
 
         const data = await response.json();
-        const items = Array.isArray(data) ? data : Array.isArray(data?.items) ? data.items : [];
+        const items = Array.isArray(data)
+          ? data
+          : Array.isArray(data?.items)
+          ? data.items
+          : [];
 
-        setTodayBoard(items);
+        const normalized = normalizeBoardGames(items);
+
+        setTodayBoard(normalized);
+        setBoardHasAnyMissingLogos(
+          normalized.some((game) => !game.homeLogo || !game.awayLogo)
+        );
+
         localStorage.setItem(
           TODAY_BOARD_CACHE_KEY,
           JSON.stringify({ date: todayKey, items })
         );
       } catch {
         setTodayBoardError("Could not load today's board.");
+        setTodayBoard([]);
+        setBoardHasAnyMissingLogos(false);
       } finally {
         setTodayBoardLoading(false);
       }
@@ -750,6 +1062,10 @@ export default function App() {
 
   const filteredOpponentOptions = otherUsers.filter((u) =>
     u.username.toLowerCase().includes(opponentSearch.toLowerCase())
+  );
+
+  const filteredBoardOpponentOptions = otherUsers.filter((u) =>
+    u.username.toLowerCase().includes(boardOpponentSearch.toLowerCase())
   );
 
   const openBetsFeed = validBets.filter((b) => b.status === "accepted");
@@ -894,6 +1210,7 @@ export default function App() {
     setAuthError("");
     setAuthMode("login");
     setShowCreateBetModal(false);
+    setShowBoardBetModal(false);
   }
 
   function goToPage(nextPage) {
@@ -923,6 +1240,24 @@ export default function App() {
     setWinAmount("");
   }
 
+    function resetBoardBetModal() {
+    setCreateBetError("");
+    setBoardOpponentSearch("");
+    setBoardSelectedOpponentId("");
+    setBoardTakingTeam("");
+    setBoardAgainstTeam("");
+    setBoardMarketType("side");
+    setBoardTotalPick("over");
+    setBoardTotalNumber("");
+    setBoardSidePick("ml");
+    setBoardSideNumber("");
+    setBoardClassicOdds("+100");
+    setBoardTakingLogo("");
+    setBoardAgainstLogo("");
+    setBoardBetAmount("");
+    setBoardWinAmount("");
+  }
+
   function handleAmountChange(value) {
     const clean = sanitizeMoneyInput(value);
     setBetAmount(clean);
@@ -930,6 +1265,11 @@ export default function App() {
     if (betMode === "custom") {
       setWinAmount(clean);
     }
+  }
+
+  function handleBoardAmountChange(value) {
+    const clean = sanitizeMoneyInput(value);
+    setBoardBetAmount(clean);
   }
 
   function handleClassicOddsChange(value) {
@@ -963,16 +1303,20 @@ export default function App() {
       return;
     }
 
-    if (marketType === "total" || sidePick !== "ml") {
-      setClassicOdds("-110");
-    } else {
-      setClassicOdds("+100");
-    }
+    setClassicOdds("+100");
   }
 
   function resolveTypedOpponentId() {
     if (selectedOpponentId) return selectedOpponentId;
     const clean = opponentSearch.trim().toLowerCase();
+    if (!clean) return "";
+    const exact = otherUsers.find((u) => u.username.toLowerCase() === clean);
+    return exact?.id || "";
+  }
+
+  function resolveTypedBoardOpponentId() {
+    if (boardSelectedOpponentId) return boardSelectedOpponentId;
+    const clean = boardOpponentSearch.trim().toLowerCase();
     if (!clean) return "";
     const exact = otherUsers.find((u) => u.username.toLowerCase() === clean);
     return exact?.id || "";
@@ -1026,6 +1370,73 @@ export default function App() {
         odds: classicOdds,
       }),
     };
+  }
+
+    function getBoardCreateBetPayload() {
+    if (!boardTakingTeam.trim() || !boardAgainstTeam.trim()) {
+      return { error: "Enter both teams." };
+    }
+
+    const oddsValue = oddsToNumber(boardClassicOdds);
+    if (!Number.isFinite(oddsValue) || Math.abs(oddsValue) > 10000) {
+      return { error: "Enter valid odds between -10000 and +10000." };
+    }
+
+    if (boardMarketType === "total") {
+      if (!boardTotalNumber.trim()) return { error: "Enter the total number." };
+
+      return {
+        payload: buildClassicPayload({
+          takingTeam: boardTakingTeam,
+          againstTeam: boardAgainstTeam,
+          marketType: "total",
+          totalPick: boardTotalPick,
+          totalNumber: boardTotalNumber.trim(),
+          sidePick: null,
+          sideNumber: null,
+          odds: "+100",
+        }),
+      };
+    }
+
+    if (boardSidePick !== "ml" && !boardSideNumber.trim()) {
+      return { error: "Enter the spread number." };
+    }
+
+    return {
+      payload: buildClassicPayload({
+        takingTeam: boardTakingTeam,
+        againstTeam: boardAgainstTeam,
+        marketType: "side",
+        totalPick: null,
+        totalNumber: null,
+        sidePick: boardSidePick,
+        sideNumber: boardSidePick === "ml" ? "EVEN" : boardSideNumber.trim(),
+        odds: boardSidePick === "ml" ? boardClassicOdds : "+100",
+      }),
+    };
+  }
+
+  async function persistNewBet(newBet) {
+    const { error } = await supabase.from("bets").insert([
+      {
+        id: newBet.id,
+        proposer_id: newBet.proposerId,
+        acceptor_id: newBet.acceptorId,
+        text: newBet.text,
+        amount: newBet.amount,
+        win_amount: newBet.winAmount,
+        status: newBet.status,
+        proposer_grade: newBet.proposerGrade,
+        acceptor_grade: newBet.acceptorGrade,
+        proposer_paid: newBet.proposerPaid,
+        acceptor_paid: newBet.acceptorPaid,
+        created_at: newBet.createdAt,
+        updated_at: newBet.updatedAt,
+      },
+    ]);
+
+    return error;
   }
 
   async function handleCreateBet() {
@@ -1089,23 +1500,7 @@ export default function App() {
       updatedAt: getNow(),
     };
 
-    const { error } = await supabase.from("bets").insert([
-      {
-        id: newBet.id,
-        proposer_id: newBet.proposerId,
-        acceptor_id: newBet.acceptorId,
-        text: newBet.text,
-        amount: newBet.amount,
-        win_amount: newBet.winAmount,
-        status: newBet.status,
-        proposer_grade: newBet.proposerGrade,
-        acceptor_grade: newBet.acceptorGrade,
-        proposer_paid: newBet.proposerPaid,
-        acceptor_paid: newBet.acceptorPaid,
-        created_at: newBet.createdAt,
-        updated_at: newBet.updatedAt,
-      },
-    ]);
+    const error = await persistNewBet(newBet);
 
     if (error) {
       setCreateBetError("Could not create bet.");
@@ -1120,11 +1515,87 @@ export default function App() {
     setTimeout(() => setPageLoading(false), 250);
   }
 
-  async function deleteBet(betId) {
-    const { error } = await supabase.from("bets").delete().eq("id", betId);
-    if (error) return;
-    setBets((prev) => prev.filter((b) => b.id !== betId));
+  async function handleCreateBoardBet() {
+    setCreateBetError("");
+
+    if (!currentUser) {
+      setCreateBetError("Please sign in.");
+      return;
+    }
+
+    const resolvedOpponentId = resolveTypedBoardOpponentId();
+
+    if (!resolvedOpponentId) {
+      setCreateBetError("Select or type an exact username for your opponent.");
+      return;
+    }
+
+    if (resolvedOpponentId === currentUser.id) {
+      setCreateBetError("You cannot create a bet against yourself.");
+      return;
+    }
+
+    if (!boardBetAmount || !boardWinAmount) {
+      setCreateBetError("Enter bet amount and win amount.");
+      return;
+    }
+
+    const amountNum = Number(boardBetAmount);
+    const winNum = Number(boardWinAmount);
+
+    if (!Number.isFinite(amountNum) || amountNum <= 0) {
+      setCreateBetError("Enter a valid bet amount.");
+      return;
+    }
+
+    if (!Number.isFinite(winNum) || winNum <= 0) {
+      setCreateBetError("Enter a valid win amount.");
+      return;
+    }
+
+    const result = getBoardCreateBetPayload();
+    if (result.error) {
+      setCreateBetError(result.error);
+      return;
+    }
+
+    const newBet = {
+      id: crypto.randomUUID(),
+      proposerId: currentUser.id,
+      acceptorId: resolvedOpponentId,
+      text: serializeBetPayload(result.payload),
+      betPayload: result.payload,
+      amount: amountNum,
+      winAmount: winNum,
+      status: "proposed",
+      proposerGrade: null,
+      acceptorGrade: null,
+      proposerPaid: false,
+      acceptorPaid: false,
+      createdAt: getNow(),
+      updatedAt: getNow(),
+    };
+
+    const error = await persistNewBet(newBet);
+
+    if (error) {
+      setCreateBetError("Could not create bet.");
+      return;
+    }
+
+    setBets((prev) => [newBet, ...prev]);
+    setShowBoardBetModal(false);
+    resetBoardBetModal();
+
+    setPageLoading(true);
+    setTimeout(() => setPageLoading(false), 250);
   }
+
+  async function deleteBet(betId) {
+  const { error } = await supabase.from("bets").delete().eq("id", betId);
+  if (error) return;
+  setBets((prev) => prev.filter((b) => b.id !== betId));
+}
 
   async function acceptBet(betId) {
     const updatedAt = getNow();
@@ -1183,20 +1654,20 @@ export default function App() {
   async function gradeBet(betId, result) {
     if (!currentUser) return;
 
-    const bet = bets.find((b) => b.id === betId);
-    if (!bet) return;
+    const selectedBet = bets.find((b) => b.id === betId);
+    if (!selectedBet) return;
 
-    const isProposer = bet.proposerId === currentUser.id;
-    const otherGrade = isProposer ? bet.acceptorGrade : bet.proposerGrade;
     const warning = gradeWarnings[betId];
+    const isProposer = selectedBet.proposerId === currentUser.id;
+    const otherGrade = isProposer ? selectedBet.acceptorGrade : selectedBet.proposerGrade;
 
     if (!otherGrade) {
       const updatedAt = getNow();
       const { error } = await supabase
         .from("bets")
         .update({
-          proposer_grade: isProposer ? result : bet.proposerGrade,
-          acceptor_grade: isProposer ? bet.acceptorGrade : result,
+          proposer_grade: isProposer ? result : selectedBet.proposerGrade,
+          acceptor_grade: isProposer ? selectedBet.acceptorGrade : result,
           status: "accepted",
           updated_at: updatedAt,
         })
@@ -1272,8 +1743,8 @@ export default function App() {
 
     if (result !== otherGrade) {
       const updatedAt = getNow();
-      const nextProposerGrade = isProposer ? result : bet.proposerGrade;
-      const nextAcceptorGrade = isProposer ? bet.acceptorGrade : result;
+      const nextProposerGrade = isProposer ? result : selectedBet.proposerGrade;
+      const nextAcceptorGrade = isProposer ? selectedBet.acceptorGrade : result;
 
       const { error } = await supabase
         .from("bets")
@@ -1463,26 +1934,42 @@ export default function App() {
     ) : null;
   }
 
-  function handleUseBoardLine(item) {
-    setShowCreateBetModal(true);
-    setBetMode("classic");
-    setTakingTeam(item.home_team || item.homeTeam || "");
-    setAgainstTeam(item.away_team || item.awayTeam || "");
-    setMarketType(item.marketType === "total" ? "total" : "side");
+    function openBoardBetModal(selection) {
+    setCreateBetError("");
+    setShowBoardBetModal(true);
+    setBoardOpponentSearch("");
+    setBoardSelectedOpponentId("");
+    setBoardBetAmount("");
+    setBoardWinAmount("");
 
-    if (item.marketType === "total") {
-      setTotalPick(item.totalPick || "over");
-      setTotalNumber(String(item.totalNumber || ""));
-      setSidePick("ml");
-      setSideNumber("");
-    } else {
-      setSidePick(item.sidePick || "ml");
-      setSideNumber(item.sidePick && item.sidePick !== "ml" ? String(item.sideNumber || "") : "");
-      setTotalPick("over");
-      setTotalNumber("");
+    setBoardTakingTeam(selection.takingTeam || "");
+    setBoardAgainstTeam(selection.againstTeam || "");
+    setBoardTakingLogo(selection.takingLogo || "");
+    setBoardAgainstLogo(selection.againstLogo || "");
+    setBoardMarketType(selection.marketType || "side");
+
+    if (selection.marketType === "total") {
+      setBoardTotalPick(selection.totalPick || "over");
+      setBoardTotalNumber(String(selection.totalNumber || ""));
+      setBoardSidePick("ml");
+      setBoardSideNumber("");
+      setBoardClassicOdds("+100");
+      return;
     }
 
-    setClassicOdds(formatOddsForDisplay(item.odds || (item.sidePick === "ml" ? "+100" : "-110")));
+    setBoardTotalPick("over");
+    setBoardTotalNumber("");
+    setBoardSidePick(selection.sidePick || "ml");
+    setBoardSideNumber(
+      selection.sidePick && selection.sidePick !== "ml"
+        ? String(selection.sideNumber || "")
+        : ""
+    );
+    setBoardClassicOdds(
+      selection.sidePick === "ml"
+        ? formatOddsForDisplay(selection.odds || "+100")
+        : "+100"
+    );
   }
 
   function renderBetCard(bet, options = {}) {
@@ -1987,17 +2474,180 @@ export default function App() {
           max-width: 540px;
         }
 
-        .modalTitle {
+                .boardBetModal {
+          max-width: 470px;
+          max-height: min(82vh, 700px);
+          padding: 16px;
+        }
+
+                .modalTitle {
           margin: 10px 0 10px 0;
           font-size: 28px;
           font-weight: 900;
           text-align: center;
         }
+          .boardList {
+  gap: 10px;
+}
 
-        .modalCopy {
+.boardGameCard {
+  background: rgba(10, 14, 20, 0.92);
+  border: 1px solid rgba(255,255,255,0.08);
+  border-radius: 14px;
+  padding: 8px 10px 10px;
+  box-shadow: inset 0 0 0 1px rgba(255,255,255,0.015);
+}
+
+.boardHeaderRow {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 270px;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 6px;
+}
+
+.boardHeaderLeft {
+  font-size: 10px;
+  color: #c7cfda;
+  opacity: 0.9;
+}
+
+.boardHeaderMarkets {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.boardHeaderCell {
+  text-align: center;
+  font-size: 9px;
+  color: #b3bcc7;
+  opacity: 0.85;
+}
+
+.boardTeamRow {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 270px;
+  gap: 10px;
+  align-items: center;
+  margin-bottom: 6px;
+}
+
+.boardTeamInfo {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.boardTeamName {
+  font-size: 12px;
+  font-weight: 800;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.boardMarketGrid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.boardMarketCell {
+  border: 1px solid rgba(255,255,255,0.08);
+  background: rgba(255,255,255,0.04);
+  color: #edf2f7;
+  border-radius: 8px;
+  min-height: 34px;
+  padding: 5px 4px;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  align-items: center;
+  cursor: pointer;
+  box-shadow: inset 0 0 0 1px rgba(255,255,255,0.015);
+}
+
+.boardMarketCell:hover {
+  background: rgba(255,255,255,0.08);
+  border-color: rgba(70,215,255,0.22);
+}
+
+.boardMainValue {
+  font-size: 11px;
+  font-weight: 800;
+  line-height: 1;
+}
+
+.boardSubValue {
+  margin-top: 3px;
+  font-size: 9px;
+  color: #9ee3b0;
+  line-height: 1;
+  min-height: 9px;
+}
+
+.boardFooterRow {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 4px;
+  font-size: 10px;
+  color: #97a1ae;
+}
+
+.boardLiveDot {
+  width: 10px;
+  height: 10px;
+  border-radius: 999px;
+  background: rgba(38,207,96,0.16);
+  border: 1px solid rgba(38,207,96,0.55);
+  position: relative;
+  flex: 0 0 10px;
+}
+
+.boardLiveDot::after {
+  content: "";
+  position: absolute;
+  inset: 2px;
+  border-radius: 999px;
+  background: var(--green);
+}
+
+.boardBetModal .teamLogoWrap.large {
+  width: 42px;
+  height: 42px;
+  flex: 0 0 42px;
+}
+
+.boardLogoRow {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.logoVs {
+  font-size: 12px;
+  font-weight: 900;
+  color: var(--muted);
+  letter-spacing: 0.08em;
+}
+
+        .boardBetModal .modalTitle {
+          font-size: 22px;
+          margin: 8px 0 6px 0;
+        }
+
+                .modalCopy {
           color: var(--muted);
           text-align: center;
           margin: 0 0 12px 0;
+        }
+
+        .boardBetModal .modalCopy {
+          font-size: 12px;
+          margin-bottom: 8px;
         }
 
         .closeX {
@@ -2023,7 +2673,7 @@ export default function App() {
           font-weight: 600;
         }
 
-        input,
+                input,
         textarea {
           width: 100%;
           padding: 13px 14px;
@@ -2032,6 +2682,12 @@ export default function App() {
           background: rgba(255,255,255,0.035);
           color: white;
           outline: none;
+        }
+
+        .boardBetModal input,
+        .boardBetModal textarea {
+          padding: 11px 12px;
+          border-radius: 14px;
         }
 
         input:focus,
@@ -2051,7 +2707,13 @@ export default function App() {
           gap: 12px;
         }
 
-        .moneyInput {
+        .threeCol {
+          display: grid;
+          grid-template-columns: 1fr 1fr 1fr;
+          gap: 10px;
+        }
+
+                .moneyInput {
           display: flex;
           align-items: center;
           gap: 8px;
@@ -2059,6 +2721,10 @@ export default function App() {
           border-radius: 16px;
           border: 1px solid rgba(255,255,255,0.10);
           background: rgba(255,255,255,0.035);
+        }
+
+        .boardBetModal .moneyInput {
+          border-radius: 14px;
         }
 
         .moneyInput span {
@@ -2127,6 +2793,12 @@ export default function App() {
           box-shadow: inset 0 0 0 1px rgba(255,255,255,0.015);
         }
 
+                .boardRowTop,
+        .boardRowTop {
+          gap: 10px;
+          align-items: center;
+        }
+
         .betGlow {
           position: absolute;
           inset: -1px;
@@ -2152,6 +2824,11 @@ export default function App() {
           align-items: center;
         }
 
+        .boardCard.condensed .boardRowTop {
+          gap: 10px;
+          align-items: center;
+        }
+
         .betLeft,
         .boardLeft {
           min-width: 0;
@@ -2172,11 +2849,21 @@ export default function App() {
           letter-spacing: -0.01em;
         }
 
+        .boardCard.condensed .boardTitle {
+          font-size: 15px;
+          line-height: 1.1;
+        }
+
         .betSub,
         .boardSub {
           color: var(--muted);
           font-size: 13px;
           margin-top: 7px;
+        }
+
+        .boardCard.condensed .boardSub {
+          font-size: 11px;
+          margin-top: 3px;
         }
 
         .betRowBottom,
@@ -2189,6 +2876,101 @@ export default function App() {
           color: #e1e7ee;
           font-size: 14px;
           margin-top: 14px;
+        }
+
+        .boardCard.condensed .boardRowBottom {
+          gap: 8px 16px;
+          margin-top: 8px;
+          font-size: 12px;
+        }
+
+        .boardMatchup {
+          display: flex;
+          align-items: center;
+          gap: 10px;
+          min-width: 0;
+        }
+
+        .teamStack {
+          display: flex;
+          flex-direction: column;
+          gap: 7px;
+          min-width: 0;
+          flex: 1;
+        }
+
+        .teamRow {
+          display: flex;
+          align-items: center;
+          gap: 8px;
+          min-width: 0;
+        }
+
+        .teamText {
+          min-width: 0;
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          gap: 10px;
+          width: 100%;
+        }
+
+        .teamName {
+          font-size: 13px;
+          font-weight: 800;
+          white-space: nowrap;
+          overflow: hidden;
+          text-overflow: ellipsis;
+        }
+
+        .teamMarket {
+          font-size: 12px;
+          color: var(--muted);
+          white-space: nowrap;
+          font-weight: 700;
+        }
+
+        .teamLogoWrap {
+          width: 28px;
+          height: 28px;
+          border-radius: 999px;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          background: rgba(255,255,255,0.05);
+          border: 1px solid rgba(255,255,255,0.12);
+          overflow: hidden;
+          flex: 0 0 28px;
+        }
+
+        .teamLogoWrap.fallback {
+          font-size: 10px;
+          font-weight: 900;
+          color: #fff;
+          background: linear-gradient(180deg, rgba(70,215,255,0.22), rgba(38,207,96,0.18));
+        }
+
+        .teamLogo {
+          width: 100%;
+          height: 100%;
+          object-fit: contain;
+          background: white;
+        }
+        .teamLogo {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  background: white;
+}
+        .vsPill {
+          font-size: 10px;
+          font-weight: 900;
+          letter-spacing: 0.08em;
+          color: var(--muted);
+          border: 1px solid rgba(255,255,255,0.08);
+          background: rgba(255,255,255,0.04);
+          padding: 5px 7px;
+          border-radius: 999px;
         }
 
         .compactMeta {
@@ -2207,7 +2989,11 @@ export default function App() {
         }
 
         .boardInlineBtn {
-          min-width: 140px;
+          min-width: 116px;
+          height: 38px;
+          border-radius: 14px;
+          padding: 0 14px;
+          font-size: 13px;
         }
 
         .tableWrap {
@@ -2254,6 +3040,37 @@ export default function App() {
 
         .settleInlineBtn {
           min-width: 170px;
+        }
+
+        .boardModalGameHeader {
+          display: flex;
+          align-items: center;
+          gap: 14px;
+          margin-top: 14px;
+          padding: 14px;
+          border-radius: 18px;
+          background: rgba(255,255,255,0.035);
+          border: 1px solid rgba(255,255,255,0.08);
+        }
+
+        .boardModalTeams {
+          flex: 1;
+          min-width: 0;
+        }
+
+        .boardModalTeams .main {
+          font-size: 16px;
+          font-weight: 900;
+        }
+
+        .boardModalTeams .sub {
+          margin-top: 4px;
+          color: var(--muted);
+          font-size: 12px;
+        }
+
+        .boardLockedInput input {
+          opacity: 0.88;
         }
 
         .skeleton {
@@ -2330,7 +3147,8 @@ export default function App() {
           font-size: 13px;
         }
 
-        .msgErr {
+        .msgErr,
+        .errorText {
           color: #ff8f8f;
           margin-top: 12px;
           font-size: 13px;
@@ -2351,7 +3169,8 @@ export default function App() {
             grid-template-columns: 1fr auto;
           }
 
-          .twoCol {
+          .twoCol,
+          .threeCol {
             grid-template-columns: 1fr;
           }
 
@@ -2364,6 +3183,11 @@ export default function App() {
           .boardCard {
             padding: 16px;
             border-radius: 24px;
+          }
+
+          .boardCard.condensed {
+            padding: 12px;
+            border-radius: 18px;
           }
 
           .betRowTop,
@@ -2391,6 +3215,11 @@ export default function App() {
             font-size: 15px;
           }
 
+          .boardInlineBtn {
+            height: 40px;
+            font-size: 13px;
+          }
+
           .logoTitle {
             font-size: 32px;
           }
@@ -2403,8 +3232,79 @@ export default function App() {
           .logoSub {
             font-size: 11px;
           }
+
+          .teamName {
+            font-size: 12px;
+          }
+
+          .teamMarket {
+            font-size: 11px;
+          }
         }
-      `}</style>
+          /* ===== Board Responsive Fixes ===== */
+
+@media (max-width: 980px) {
+  .boardGrid {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 980px) {
+  .boardHeaderRow,
+  .boardTeamRow {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .boardHeaderMarkets,
+  .boardMarketGrid {
+    width: 100%;
+  }
+}
+
+@media (max-width: 760px) {
+  .boardGameCard {
+    padding: 10px;
+  }
+
+  .boardHeaderMarkets,
+  .boardMarketGrid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 5px;
+  }
+
+  .boardHeaderCell {
+    font-size: 8px;
+  }
+
+  .boardTeamName {
+    font-size: 11px;
+  }
+
+  .boardMainValue {
+    font-size: 10px;
+  }
+
+  .boardSubValue {
+    font-size: 8px;
+  }
+
+  .boardBetModal {
+    max-width: 100%;
+    padding: 14px;
+  }
+
+  .boardModalGameHeader {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+
+  .boardLogoRow {
+    width: 100%;
+    justify-content: flex-start;
+  }
+}
+
+`}</style>
 
       <div className="appShell">
         {showLockedState ? (
@@ -2653,7 +3553,7 @@ export default function App() {
                             className={marketType === "total" ? "radioBtn active" : "radioBtn"}
                             onClick={() => {
                               setMarketType("total");
-                              setClassicOdds("-110");
+                              setClassicOdds("+100");
                             }}
                           >
                             Total
@@ -2663,7 +3563,7 @@ export default function App() {
                             className={marketType === "side" ? "radioBtn active" : "radioBtn"}
                             onClick={() => {
                               setMarketType("side");
-                              setClassicOdds(sidePick === "ml" ? "+100" : "-110");
+                              setClassicOdds("+100");
                             }}
                           >
                             ML / Spread
@@ -2723,7 +3623,7 @@ export default function App() {
                                 className={sidePick === "plus" ? "radioBtn active" : "radioBtn"}
                                 onClick={() => {
                                   setSidePick("plus");
-                                  setClassicOdds("-110");
+                                  setClassicOdds("+100");
                                 }}
                               >
                                 +
@@ -2733,7 +3633,7 @@ export default function App() {
                                 className={sidePick === "minus" ? "radioBtn active" : "radioBtn"}
                                 onClick={() => {
                                   setSidePick("minus");
-                                  setClassicOdds("-110");
+                                  setClassicOdds("+100");
                                 }}
                               >
                                 -
@@ -2764,11 +3664,11 @@ export default function App() {
                             value={classicOdds}
                             onChange={(e) => handleClassicOddsChange(e.target.value)}
                             onBlur={handleClassicOddsBlur}
-                            placeholder={marketType === "total" || sidePick !== "ml" ? "-110" : "+100"}
+                            placeholder="+100"
                           />
                         </div>
                         <div className="helperText">
-                          Moneyline defaults to +100. Spread and total default to -110. Allowed range: -10000 to +10000.
+                          Moneyline defaults to +100. Spread and total also default to +100 here.
                         </div>
                       </div>
                     </>
@@ -2819,6 +3719,192 @@ export default function App() {
               </div>
             )}
 
+                        {showBoardBetModal && (
+              <div className="modalBackdrop">
+                <div className="modal boardBetModal">
+                  <button
+                    className="closeX"
+                    onClick={() => {
+                      setShowBoardBetModal(false);
+                      resetBoardBetModal();
+                    }}
+                  >
+                    ×
+                  </button>
+
+                  <SettleUpLogo centered small />
+                  <h2 className="modalTitle">Propose Bet</h2>
+                  <p className="modalCopy">Selected from the today classic bet board.</p>
+
+                  <div className="boardModalGameHeader">
+                    <div className="boardLogoRow">
+                      <TeamLogo src={boardTakingLogo} name={boardTakingTeam} large />
+                      <div className="logoVs">VS</div>
+                      <TeamLogo src={boardAgainstLogo} name={boardAgainstTeam} large />
+                    </div>
+
+                    <div className="boardModalTeams">
+                      <div className="main">
+                        {boardTakingTeam} vs {boardAgainstTeam}
+                      </div>
+                      <div className="sub">
+                        {boardMarketType === "total"
+                          ? `${boardTotalPick === "over" ? "Over" : "Under"} ${boardTotalNumber} • +100`
+                          : boardSidePick === "ml"
+                          ? `Moneyline • ${boardClassicOdds}`
+                          : `Spread ${boardSidePick === "plus" ? "+" : "-"}${boardSideNumber} • +100`}
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="fieldGroup">
+                    <label>Proposed By</label>
+                    <input value={currentUser?.username || ""} disabled />
+                  </div>
+
+                  <div className="fieldGroup">
+                    <label>Select Opponent Username</label>
+                    <input
+                      value={boardOpponentSearch}
+                      onChange={(e) => {
+                        setBoardOpponentSearch(e.target.value);
+                        setBoardSelectedOpponentId("");
+                        setCreateBetError("");
+                      }}
+                      placeholder="Start typing a username"
+                    />
+                    {boardOpponentSearch && !boardSelectedOpponentId && (
+                      <div className="autocompleteBox">
+                        {filteredBoardOpponentOptions.length ? (
+                          filteredBoardOpponentOptions.map((user) => (
+                            <button
+                              key={user.id}
+                              className="autocompleteItem"
+                              onClick={() => {
+                                setBoardSelectedOpponentId(user.id);
+                                setBoardOpponentSearch(user.username);
+                              }}
+                            >
+                              {user.username}
+                            </button>
+                          ))
+                        ) : (
+                          <div className="smallPad" style={{ color: "#98a1ae" }}>
+                            No dropdown match. Exact username text will still work.
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </div>
+
+                  <div className="threeCol">
+                    <div className="fieldGroup">
+                      <label>Market</label>
+                      <input
+                        value={
+                          boardMarketType === "total"
+                            ? "Total"
+                            : boardSidePick === "ml"
+                            ? "Moneyline"
+                            : "Spread"
+                        }
+                        disabled
+                      />
+                    </div>
+
+                    <div className="fieldGroup">
+                      <label>Pick</label>
+                      <input
+                        value={
+                          boardMarketType === "total"
+                            ? boardTotalPick === "over"
+                              ? "Over"
+                              : "Under"
+                            : boardSidePick === "ml"
+                            ? "ML"
+                            : boardSidePick === "plus"
+                            ? "+"
+                            : "-"
+                        }
+                        disabled
+                      />
+                    </div>
+
+                    <div className="fieldGroup">
+                      <label>{boardMarketType === "total" ? "Number" : "Line"}</label>
+                      <input
+                        value={
+                          boardMarketType === "total"
+                            ? boardTotalNumber
+                            : boardSidePick === "ml"
+                            ? "EVEN"
+                            : boardSideNumber
+                        }
+                        disabled
+                      />
+                    </div>
+                  </div>
+
+                  <div className="twoCol">
+                    <div className="fieldGroup">
+                      <label>Taking Team</label>
+                      <input value={boardTakingTeam} disabled />
+                    </div>
+                    <div className="fieldGroup">
+                      <label>Opponent Team</label>
+                      <input value={boardAgainstTeam} disabled />
+                    </div>
+                  </div>
+
+                  <div className="fieldGroup">
+                    <label>Odds</label>
+                    <div className="moneyInput oddsInput boardLockedInput">
+                      <span>US</span>
+                      <input value={boardClassicOdds} disabled />
+                    </div>
+                    <div className="helperText">
+                      Totals and spreads always stay +100. Moneyline uses the selected side.
+                    </div>
+                  </div>
+
+                  <div className="twoCol">
+                    <div className="fieldGroup">
+                      <label>Bet Amount</label>
+                      <div className="moneyInput">
+                        <span>$</span>
+                        <input
+                          value={boardBetAmount}
+                          onChange={(e) => handleBoardAmountChange(e.target.value)}
+                          placeholder="0"
+                        />
+                      </div>
+                    </div>
+
+                    <div className="fieldGroup">
+                      <label>Win Amount</label>
+                      <div className="moneyInput">
+                        <span>$</span>
+                        <input value={boardWinAmount} readOnly placeholder="0" />
+                      </div>
+                      <div className="helperText">
+                        Spread/total win equals stake. Moneyline uses the selected odds.
+                      </div>
+                    </div>
+                  </div>
+
+                  {createBetError && <div className="msgErr">{createBetError}</div>}
+
+                  <button
+                    className="greenBtn full"
+                    style={{ marginTop: 14 }}
+                    onClick={handleCreateBoardBet}
+                  >
+                    Propose Bet
+                  </button>
+                </div>
+              </div>
+            )}
+
             <main className="pageGrid shellFade">
               {page === "home" && (
                 <section className="prettyCard">
@@ -2829,73 +3915,193 @@ export default function App() {
                     </button>
                   </div>
 
-                  <div className="sectionBlock">
-                    <div className="pageHeader" style={{ marginBottom: 10 }}>
-                      <h2>Today's Classic Bet Board</h2>
-                    </div>
+                                    <div className="sectionBlock">
+  <div className="pageHeader" style={{ marginBottom: 10 }}>
+    <h2>Today's Classic Bet Board</h2>
+  </div>
 
-                    <div className="boardMetaRow" style={{ marginBottom: 12 }}>
-                      <div className="lineTag">College Basketball</div>
-                      <div className="lineTag">MLB</div>
-                      <div className="lineTag">NHL</div>
-                    </div>
+  {boardHasAnyMissingLogos && (
+    <div className="helperText" style={{ marginBottom: 12 }}>
+      Some team logos were not returned by the API, so those teams are showing initials.
+    </div>
+  )}
 
-                    {todayBoardLoading ? (
-                      <div className="emptyState">Loading today's board...</div>
-                    ) : todayBoard.length ? (
-                      <div className="scrollList">
-                        {todayBoard.slice(0, 12).map((item, index) => (
-                          <div className="boardCard" key={item.id || `${item.home_team || item.homeTeam}-${item.away_team || item.awayTeam}-${index}`}>
-                            <div className="betGlow" />
-                            <div className="boardRowTop">
-                              <div className="boardLeft">
-                                <div className="boardTitle">
-                                  {item.home_team || item.homeTeam} vs {item.away_team || item.awayTeam}
-                                </div>
-                                <div className="boardSub">
-                                  {item.sport_title || item.sportTitle || "Classic Bet"}
-                                </div>
-                              </div>
+  {todayBoardLoading ? (
+    <div className="emptyState">Loading today's board...</div>
+  ) : todayBoard.length ? (
+    <div className="scrollList boardList">
+      {todayBoard.slice(0, 16).map((game) => {
+        const spreadHomeLabel =
+          game.spread.home.sideNumber !== ""
+            ? `${game.spread.home.sidePick === "plus" ? "+" : "-"}${game.spread.home.sideNumber}`
+            : "--";
 
-                              <div className="boardRight">
-                                <button
-                                  className="greenBtn boardInlineBtn"
-                                  onClick={() => handleUseBoardLine(item)}
-                                >
-                                  Use This Line
-                                </button>
-                              </div>
-                            </div>
+        const spreadAwayLabel =
+          game.spread.away.sideNumber !== ""
+            ? `${game.spread.away.sidePick === "plus" ? "+" : "-"}${game.spread.away.sideNumber}`
+            : "--";
 
-                            <div className="boardRowBottom">
-                              <span>
-                                <strong>Market:</strong>{" "}
-                                {item.marketType === "total"
-                                  ? `Total • ${(item.totalPick || "over").toUpperCase()} ${item.totalNumber || ""}`
-                                  : item.sidePick === "ml"
-                                  ? "Moneyline"
-                                  : `Spread • ${item.sidePick === "plus" ? "+" : "-"}${item.sideNumber || ""}`}
-                              </span>
-                              <span>
-                                <strong>Odds:</strong> {formatOddsForDisplay(item.odds || "+100")}
-                              </span>
-                              {(item.commence_time || item.commenceTime) && (
-                                <span>
-                                  <strong>Start:</strong>{" "}
-                                  {new Date(item.commence_time || item.commenceTime).toLocaleString()}
-                                </span>
-                              )}
-                            </div>
-                          </div>
-                        ))}
-                      </div>
-                    ) : (
-                      <div className="emptyState">
-                        {todayBoardError ||
-                          "No board data loaded yet. When you hook up your combined odds endpoint, today's lines will appear here."}
-                      </div>
-                    )}
-                  </div>
+        const totalNumber = game.total.number || "--";
+        const boardTime = formatBoardTime(game.commenceTime);
+
+        return (
+          <div className="boardGameCard" key={game.id}>
+            <div className="boardHeaderRow">
+              <div className="boardHeaderLeft">Today</div>
+              <div className="boardHeaderMarkets">
+                <div className="boardHeaderCell">Spread</div>
+                <div className="boardHeaderCell">Total</div>
+                <div className="boardHeaderCell">Moneyline</div>
+              </div>
+            </div>
+
+            <div className="boardTeamRow">
+              <div className="boardTeamInfo">
+                <TeamLogo src={game.homeLogo} name={game.homeTeam} />
+                <span className="boardTeamName">{game.homeTeam}</span>
+              </div>
+
+              <div className="boardMarketGrid">
+                <button
+                  className="boardMarketCell"
+                  onClick={() =>
+                    openBoardBetModal({
+                      takingTeam: game.homeTeam,
+                      againstTeam: game.awayTeam,
+                      takingLogo: game.homeLogo,
+                      againstLogo: game.awayLogo,
+                      marketType: "side",
+                      sidePick: game.spread.home.sidePick,
+                      sideNumber: game.spread.home.sideNumber,
+                      odds: "+100",
+                    })
+                  }
+                >
+                  <span className="boardMainValue">{spreadHomeLabel}</span>
+                  <span className="boardSubValue">+100</span>
+                </button>
+
+                <button
+                  className="boardMarketCell"
+                  onClick={() =>
+                    openBoardBetModal({
+                      takingTeam: game.homeTeam,
+                      againstTeam: game.awayTeam,
+                      takingLogo: game.homeLogo,
+                      againstLogo: game.awayLogo,
+                      marketType: "total",
+                      totalPick: "over",
+                      totalNumber,
+                      odds: "+100",
+                    })
+                  }
+                >
+                  <span className="boardMainValue">O {totalNumber}</span>
+                  <span className="boardSubValue">+100</span>
+                </button>
+
+                <button
+                  className="boardMarketCell"
+                  onClick={() =>
+                    openBoardBetModal({
+                      takingTeam: game.homeTeam,
+                      againstTeam: game.awayTeam,
+                      takingLogo: game.homeLogo,
+                      againstLogo: game.awayLogo,
+                      marketType: "side",
+                      sidePick: "ml",
+                      sideNumber: "EVEN",
+                      odds: game.moneyline.home,
+                    })
+                  }
+                >
+                  <span className="boardMainValue">{game.moneyline.home}</span>
+                  <span className="boardSubValue">&nbsp;</span>
+                </button>
+              </div>
+            </div>
+
+            <div className="boardTeamRow">
+              <div className="boardTeamInfo">
+                <TeamLogo src={game.awayLogo} name={game.awayTeam} />
+                <span className="boardTeamName">{game.awayTeam}</span>
+              </div>
+
+              <div className="boardMarketGrid">
+                <button
+                  className="boardMarketCell"
+                  onClick={() =>
+                    openBoardBetModal({
+                      takingTeam: game.awayTeam,
+                      againstTeam: game.homeTeam,
+                      takingLogo: game.awayLogo,
+                      againstLogo: game.homeLogo,
+                      marketType: "side",
+                      sidePick: game.spread.away.sidePick,
+                      sideNumber: game.spread.away.sideNumber,
+                      odds: "+100",
+                    })
+                  }
+                >
+                  <span className="boardMainValue">{spreadAwayLabel}</span>
+                  <span className="boardSubValue">+100</span>
+                </button>
+
+                <button
+                  className="boardMarketCell"
+                  onClick={() =>
+                    openBoardBetModal({
+                      takingTeam: game.awayTeam,
+                      againstTeam: game.homeTeam,
+                      takingLogo: game.awayLogo,
+                      againstLogo: game.homeLogo,
+                      marketType: "total",
+                      totalPick: "under",
+                      totalNumber,
+                      odds: "+100",
+                    })
+                  }
+                >
+                  <span className="boardMainValue">U {totalNumber}</span>
+                  <span className="boardSubValue">+100</span>
+                </button>
+
+                <button
+                  className="boardMarketCell"
+                  onClick={() =>
+                    openBoardBetModal({
+                      takingTeam: game.awayTeam,
+                      againstTeam: game.homeTeam,
+                      takingLogo: game.awayLogo,
+                      againstLogo: game.homeLogo,
+                      marketType: "side",
+                      sidePick: "ml",
+                      sideNumber: "EVEN",
+                      odds: game.moneyline.away,
+                    })
+                  }
+                >
+                  <span className="boardMainValue">{game.moneyline.away}</span>
+                  <span className="boardSubValue">&nbsp;</span>
+                </button>
+              </div>
+            </div>
+
+            <div className="boardFooterRow">
+              <span className="boardLiveDot" />
+              <span>{boardTime || game.sportTitle}</span>
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  ) : (
+    <div className="emptyState">
+      {todayBoardError ||
+        "No college basketball board data loaded yet. If your endpoint uses different field names, send one sample object and I’ll map it exactly."}
+    </div>
+  )}
+</div>
 
                   <div className="sectionBlock">
                     <div className="pageHeader" style={{ marginBottom: 10 }}>
