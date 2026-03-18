@@ -342,7 +342,7 @@ export default function App() {
   const [authMode, setAuthMode] = useState("login");
   const [authError, setAuthError] = useState("");
 
-  const [signupName, setSignupName] = useState("");
+  const [signupUsername, setSignupUsername] = useState("");
   const [signupEmail, setSignupEmail] = useState("");
   const [signupPassword, setSignupPassword] = useState("");
 
@@ -386,6 +386,7 @@ export default function App() {
       match || {
         id: authUser.id,
         name:
+          authUser.user_metadata?.username ||
           authUser.user_metadata?.name ||
           authUser.email?.split("@")[0] ||
           "User",
@@ -452,6 +453,7 @@ export default function App() {
       id: user.id,
       email: user.email || "",
       name:
+        user.user_metadata?.username ||
         user.user_metadata?.name ||
         user.email?.split("@")[0] ||
         "User",
@@ -555,11 +557,39 @@ export default function App() {
     [currentUser, users, bets]
   );
 
+  async function usernameExists(username) {
+    const clean = username.trim().toLowerCase();
+    const { data, error } = await supabase
+      .from("profiles")
+      .select("id, name")
+      .ilike("name", clean)
+      .limit(1);
+
+    if (error) return false;
+    return Array.isArray(data) && data.length > 0;
+  }
+
   async function handleSignup() {
     setAuthError("");
 
-    if (!signupName || !signupEmail || !signupPassword) {
+    if (!signupUsername || !signupEmail || !signupPassword) {
       setAuthError("Please fill out all create account fields.");
+      return;
+    }
+
+    const cleanUsername = signupUsername.trim();
+
+    if (cleanUsername.length < 3) {
+      setAuthError("Username must be at least 3 characters.");
+      return;
+    }
+
+    const exists = users.some(
+      (u) => u.name.toLowerCase() === cleanUsername.toLowerCase()
+    ) || (await usernameExists(cleanUsername));
+
+    if (exists) {
+      setAuthError("That username is already taken.");
       return;
     }
 
@@ -568,7 +598,7 @@ export default function App() {
       password: signupPassword,
       options: {
         data: {
-          name: signupName.trim(),
+          username: cleanUsername,
         },
       },
     });
@@ -592,7 +622,7 @@ export default function App() {
       }
     }
 
-    setSignupName("");
+    setSignupUsername("");
     setSignupEmail("");
     setSignupPassword("");
   }
@@ -643,6 +673,16 @@ export default function App() {
     const clean = value.replace(/[^\d.]/g, "");
     setBetAmount(clean);
     setWinAmount(clean);
+  }
+
+  function resolveTypedOpponentId() {
+    if (selectedOpponentId) return selectedOpponentId;
+
+    const clean = opponentSearch.trim().toLowerCase();
+    if (!clean) return "";
+
+    const exactMatch = otherUsers.find((u) => u.name.toLowerCase() === clean);
+    return exactMatch?.id || "";
   }
 
   function getCreateBetPayload() {
@@ -704,8 +744,10 @@ export default function App() {
       return;
     }
 
-    if (!selectedOpponentId) {
-      setCreateBetError("Select an opponent.");
+    const resolvedOpponentId = resolveTypedOpponentId();
+
+    if (!resolvedOpponentId) {
+      setCreateBetError("Select or type an exact username for your opponent.");
       return;
     }
 
@@ -726,7 +768,7 @@ export default function App() {
     const newBet = {
       id: uid(),
       proposerId: currentUser.id,
-      acceptorId: selectedOpponentId,
+      acceptorId: resolvedOpponentId,
       text: serializeBetPayload(payload),
       betPayload: payload,
       amount: Number(betAmount),
@@ -1768,11 +1810,11 @@ export default function App() {
                   {authMode === "signup" ? (
                     <>
                       <div className="fieldGroup">
-                        <label>Name</label>
+                        <label>Username</label>
                         <input
-                          value={signupName}
-                          onChange={(e) => setSignupName(e.target.value)}
-                          placeholder="Enter name"
+                          value={signupUsername}
+                          onChange={(e) => setSignupUsername(e.target.value)}
+                          placeholder="Enter username"
                         />
                       </div>
                       <div className="fieldGroup">
@@ -1894,14 +1936,15 @@ export default function App() {
                   </div>
 
                   <div className="fieldGroup">
-                    <label>Select Opponent</label>
+                    <label>Select Opponent Username</label>
                     <input
                       value={opponentSearch}
                       onChange={(e) => {
                         setOpponentSearch(e.target.value);
                         setSelectedOpponentId("");
+                        setCreateBetError("");
                       }}
-                      placeholder="Start typing a name"
+                      placeholder="Start typing a username"
                     />
                     {opponentSearch && !selectedOpponentId && (
                       <div className="autocompleteBox">
@@ -1919,7 +1962,9 @@ export default function App() {
                             </button>
                           ))
                         ) : (
-                          <div className="smallPad softText">No matching users</div>
+                          <div className="smallPad softText">
+                            No dropdown match. Exact username text will still work.
+                          </div>
                         )}
                       </div>
                     )}
@@ -2155,7 +2200,7 @@ export default function App() {
                       <table>
                         <thead>
                           <tr>
-                            <th>User</th>
+                            <th>Username</th>
                             <th>Net</th>
                           </tr>
                         </thead>
@@ -2243,7 +2288,7 @@ export default function App() {
                       <table>
                         <thead>
                           <tr>
-                            <th>User</th>
+                            <th>Username</th>
                             <th>Balance</th>
                           </tr>
                         </thead>
@@ -2291,7 +2336,7 @@ export default function App() {
                       <table>
                         <thead>
                           <tr>
-                            <th>User</th>
+                            <th>Username</th>
                             <th>You Are</th>
                           </tr>
                         </thead>
