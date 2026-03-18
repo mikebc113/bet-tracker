@@ -2,10 +2,14 @@ import { useEffect, useMemo, useState } from "react";
 import { supabase } from "./supabase";
 
 const filters = ["Day", "Month", "Year", "All Time"];
+const TODAY_BOARD_CACHE_KEY = "settleup_today_board_cache_v1";
 
 function currency(value) {
   const num = Number(value || 0);
-  const abs = Math.abs(num).toLocaleString();
+  const abs = Math.abs(num).toLocaleString(undefined, {
+    minimumFractionDigits: Number.isInteger(abs) ? 0 : 2,
+    maximumFractionDigits: 2,
+  });
   return num < 0 ? `-$${abs}` : `$${abs}`;
 }
 
@@ -54,6 +58,75 @@ function getBetDisplayStatus(bet) {
   return bet.status;
 }
 
+function sanitizeMoneyInput(value) {
+  const clean = value.replace(/[^\d.]/g, "");
+  const parts = clean.split(".");
+  if (parts.length <= 2) return clean;
+  return `${parts[0]}.${parts.slice(1).join("")}`;
+}
+
+function normalizeOdds(value) {
+  if (value == null) return "";
+  let raw = String(value).trim().replace(/[^\d+-]/g, "");
+  if (!raw) return "";
+
+  let sign = "";
+  if (raw.startsWith("-")) sign = "-";
+  else if (raw.startsWith("+")) sign = "+";
+
+  const digits = raw.replace(/[^\d]/g, "");
+  if (!digits) return "";
+
+  let num = Number(digits);
+  if (!Number.isFinite(num)) return "";
+
+  if (num > 10000) num = 10000;
+  if (num === 0) num = 100;
+
+  return `${sign || "+"}${num}`;
+}
+
+function formatOddsForDisplay(odds) {
+  const normalized = normalizeOdds(odds);
+  return normalized || "+100";
+}
+
+function oddsToNumber(odds) {
+  const normalized = normalizeOdds(odds);
+  if (!normalized) return null;
+  const value = Number(normalized);
+  return Number.isFinite(value) ? value : null;
+}
+
+function calculateWinAmount(stake, odds) {
+  const bet = Number(stake);
+  const line = oddsToNumber(odds);
+
+  if (!Number.isFinite(bet) || bet <= 0 || !Number.isFinite(line) || line === 0) {
+    return "";
+  }
+
+  let win = 0;
+
+  if (line > 0) {
+    win = (bet * line) / 100;
+  } else {
+    win = (bet * 100) / Math.abs(line);
+  }
+
+  if (!Number.isFinite(win) || win <= 0) return "";
+
+  return win.toFixed(2).replace(/\.00$/, "").replace(/(\.\d)0$/, "$1");
+}
+
+function getTodayKey() {
+  const now = new Date();
+  const yyyy = now.getFullYear();
+  const mm = `${now.getMonth() + 1}`.padStart(2, "0");
+  const dd = `${now.getDate()}`.padStart(2, "0");
+  return `${yyyy}-${mm}-${dd}`;
+}
+
 function buildCustomPayload(details) {
   return {
     version: 2,
@@ -70,6 +143,7 @@ function buildClassicPayload({
   totalNumber,
   sidePick,
   sideNumber,
+  odds,
 }) {
   return {
     version: 2,
@@ -81,6 +155,7 @@ function buildClassicPayload({
     totalNumber: marketType === "total" ? totalNumber : null,
     sidePick: marketType === "side" ? sidePick : null,
     sideNumber: marketType === "side" ? sideNumber : null,
+    odds: formatOddsForDisplay(odds),
   };
 }
 
@@ -90,7 +165,12 @@ function serializeBetPayload(payload) {
 
 function parseBetPayload(text) {
   const parsed = safeJsonParse(text);
-  if (parsed && parsed.version === 2 && parsed.kind) return parsed;
+  if (parsed && parsed.version === 2 && parsed.kind) {
+    return {
+      ...parsed,
+      odds: parsed.kind === "classic" ? formatOddsForDisplay(parsed.odds || "+100") : null,
+    };
+  }
 
   return {
     version: 1,
@@ -142,19 +222,21 @@ function getBetHeadlineForViewer(bet, currentUserId) {
 
   if (payload.kind === "custom") return payload.details || "Custom Bet";
 
+  const oddsText = payload.odds ? ` @ ${formatOddsForDisplay(payload.odds)}` : "";
+
   if (payload.marketType === "total") {
     return `${payload.takingTeam} vs ${payload.againstTeam} • ${
       payload.totalPick === "over" ? "Over" : "Under"
-    } ${payload.totalNumber}`;
+    } ${payload.totalNumber}${oddsText}`;
   }
 
   if (payload.marketType === "side") {
     if (payload.sidePick === "ml") {
-      return `${payload.takingTeam} ML vs ${payload.againstTeam}`;
+      return `${payload.takingTeam} ML vs ${payload.againstTeam}${oddsText}`;
     }
 
     const sign = payload.sidePick === "plus" ? "+" : "-";
-    return `${payload.takingTeam} ${sign}${payload.sideNumber} vs ${payload.againstTeam}`;
+    return `${payload.takingTeam} ${sign}${payload.sideNumber} vs ${payload.againstTeam}${oddsText}`;
   }
 
   return "Bet";
@@ -170,7 +252,7 @@ function getBetSublineForViewer(bet, currentUserId, users) {
     detail = "Classic • Total";
   }
   if (payload.kind === "classic" && payload.marketType === "side") {
-    detail = "Classic • ML/Spread";
+    detail = payload.sidePick === "ml" ? "Classic • Moneyline" : "Classic • Spread";
   }
 
   return `${proposerName} vs ${acceptorName} • ${detail}`;
@@ -404,6 +486,7 @@ export default function App() {
   const [totalNumber, setTotalNumber] = useState("");
   const [sidePick, setSidePick] = useState("ml");
   const [sideNumber, setSideNumber] = useState("");
+  const [classicOdds, setClassicOdds] = useState("+100");
 
   const [betAmount, setBetAmount] = useState("");
   const [winAmount, setWinAmount] = useState("");
@@ -419,6 +502,10 @@ export default function App() {
   const [accountMessage, setAccountMessage] = useState("");
   const [accountError, setAccountError] = useState("");
   const [savingAccount, setSavingAccount] = useState(false);
+
+  const [todayBoard, setTodayBoard] = useState([]);
+  const [todayBoardLoading, setTodayBoardLoading] = useState(false);
+  const [todayBoardError, setTodayBoardError] = useState("");
 
   const authUser = session?.user || null;
 
@@ -484,6 +571,71 @@ export default function App() {
     if (menuOpen) window.addEventListener("click", handleClick);
     return () => window.removeEventListener("click", handleClick);
   }, [menuOpen]);
+
+  useEffect(() => {
+    if (betMode !== "classic") return;
+    setWinAmount(calculateWinAmount(betAmount, classicOdds));
+  }, [betMode, betAmount, classicOdds]);
+
+  useEffect(() => {
+    if (betMode !== "classic") return;
+
+    if (marketType === "total") {
+      if (!classicOdds) setClassicOdds("-110");
+      return;
+    }
+
+    if (sidePick === "ml") {
+      if (!classicOdds || classicOdds === "-110") setClassicOdds("+100");
+      return;
+    }
+
+    if (!classicOdds || classicOdds === "+100") {
+      setClassicOdds("-110");
+    }
+  }, [betMode, marketType, sidePick, classicOdds]);
+
+  useEffect(() => {
+    const configuredBoardUrl = import.meta.env.VITE_COMBINED_ODDS_ENDPOINT;
+
+    if (!configuredBoardUrl) {
+      setTodayBoard([]);
+      return;
+    }
+
+    const todayKey = getTodayKey();
+    const cached = safeJsonParse(localStorage.getItem(TODAY_BOARD_CACHE_KEY));
+
+    if (cached?.date === todayKey && Array.isArray(cached?.items)) {
+      setTodayBoard(cached.items);
+      return;
+    }
+
+    async function loadTodayBoard() {
+      setTodayBoardLoading(true);
+      setTodayBoardError("");
+
+      try {
+        const response = await fetch(configuredBoardUrl);
+        if (!response.ok) throw new Error("Could not load board");
+
+        const data = await response.json();
+        const items = Array.isArray(data) ? data : Array.isArray(data?.items) ? data.items : [];
+
+        setTodayBoard(items);
+        localStorage.setItem(
+          TODAY_BOARD_CACHE_KEY,
+          JSON.stringify({ date: todayKey, items })
+        );
+      } catch {
+        setTodayBoardError("Could not load today's board.");
+      } finally {
+        setTodayBoardLoading(false);
+      }
+    }
+
+    loadTodayBoard();
+  }, []);
 
   async function ensureCurrentProfile(user) {
     if (!user) return;
@@ -766,14 +918,56 @@ export default function App() {
     setTotalNumber("");
     setSidePick("ml");
     setSideNumber("");
+    setClassicOdds("+100");
     setBetAmount("");
     setWinAmount("");
   }
 
   function handleAmountChange(value) {
-    const clean = value.replace(/[^\d.]/g, "");
+    const clean = sanitizeMoneyInput(value);
     setBetAmount(clean);
-    setWinAmount(clean);
+
+    if (betMode === "custom") {
+      setWinAmount(clean);
+    }
+  }
+
+  function handleClassicOddsChange(value) {
+    const raw = String(value).replace(/[^\d+-]/g, "");
+    if (!raw) {
+      setClassicOdds("");
+      return;
+    }
+
+    let sign = "";
+    if (raw.startsWith("-")) sign = "-";
+    else if (raw.startsWith("+")) sign = "+";
+
+    const digits = raw.replace(/[^\d]/g, "");
+    if (!digits) {
+      setClassicOdds(sign);
+      return;
+    }
+
+    let num = Number(digits);
+    if (num > 10000) num = 10000;
+    if (num === 0) num = 100;
+
+    setClassicOdds(`${sign || "+"}${num}`);
+  }
+
+  function handleClassicOddsBlur() {
+    const normalized = normalizeOdds(classicOdds);
+    if (normalized) {
+      setClassicOdds(normalized);
+      return;
+    }
+
+    if (marketType === "total" || sidePick !== "ml") {
+      setClassicOdds("-110");
+    } else {
+      setClassicOdds("+100");
+    }
   }
 
   function resolveTypedOpponentId() {
@@ -794,6 +988,11 @@ export default function App() {
       return { error: "Enter both taking and against team names." };
     }
 
+    const oddsValue = oddsToNumber(classicOdds);
+    if (!Number.isFinite(oddsValue) || Math.abs(oddsValue) > 10000) {
+      return { error: "Enter valid odds between -10000 and +10000." };
+    }
+
     if (marketType === "total") {
       if (!totalNumber.trim()) return { error: "Enter the total number." };
 
@@ -806,6 +1005,7 @@ export default function App() {
           totalNumber: totalNumber.trim(),
           sidePick,
           sideNumber,
+          odds: classicOdds,
         }),
       };
     }
@@ -823,6 +1023,7 @@ export default function App() {
         totalNumber,
         sidePick,
         sideNumber: sidePick === "ml" ? "EVEN" : sideNumber.trim(),
+        odds: classicOdds,
       }),
     };
   }
@@ -852,6 +1053,19 @@ export default function App() {
       return;
     }
 
+    const amountNum = Number(betAmount);
+    const winNum = Number(winAmount);
+
+    if (!Number.isFinite(amountNum) || amountNum <= 0) {
+      setCreateBetError("Enter a valid bet amount.");
+      return;
+    }
+
+    if (!Number.isFinite(winNum) || winNum <= 0) {
+      setCreateBetError("Enter a valid win amount.");
+      return;
+    }
+
     const result = getCreateBetPayload();
     if (result.error) {
       setCreateBetError(result.error);
@@ -864,8 +1078,8 @@ export default function App() {
       acceptorId: resolvedOpponentId,
       text: serializeBetPayload(result.payload),
       betPayload: result.payload,
-      amount: Number(betAmount),
-      winAmount: Number(winAmount),
+      amount: amountNum,
+      winAmount: winNum,
       status: "proposed",
       proposerGrade: null,
       acceptorGrade: null,
@@ -1249,6 +1463,28 @@ export default function App() {
     ) : null;
   }
 
+  function handleUseBoardLine(item) {
+    setShowCreateBetModal(true);
+    setBetMode("classic");
+    setTakingTeam(item.home_team || item.homeTeam || "");
+    setAgainstTeam(item.away_team || item.awayTeam || "");
+    setMarketType(item.marketType === "total" ? "total" : "side");
+
+    if (item.marketType === "total") {
+      setTotalPick(item.totalPick || "over");
+      setTotalNumber(String(item.totalNumber || ""));
+      setSidePick("ml");
+      setSideNumber("");
+    } else {
+      setSidePick(item.sidePick || "ml");
+      setSideNumber(item.sidePick && item.sidePick !== "ml" ? String(item.sideNumber || "") : "");
+      setTotalPick("over");
+      setTotalNumber("");
+    }
+
+    setClassicOdds(formatOddsForDisplay(item.odds || (item.sidePick === "ml" ? "+100" : "-110")));
+  }
+
   function renderBetCard(bet, options = {}) {
     if (!currentUser) return null;
 
@@ -1629,7 +1865,8 @@ export default function App() {
         .ghostBtn,
         .filterBtn,
         .tabBtn,
-        .radioBtn {
+        .radioBtn,
+        .lineTag {
           border-radius: 18px;
           padding: 10px 16px;
           cursor: pointer;
@@ -1650,7 +1887,8 @@ export default function App() {
         .ghostBtn,
         .filterBtn,
         .tabBtn,
-        .radioBtn {
+        .radioBtn,
+        .lineTag {
           border: 1px solid rgba(255,255,255,0.10);
           background: rgba(255,255,255,0.035);
           color: #edf2f7;
@@ -1702,7 +1940,8 @@ export default function App() {
         .filterRow,
         .inlineBtns,
         .radioRow,
-        .authToggleRow {
+        .authToggleRow,
+        .boardMetaRow {
           display: flex;
           gap: 10px;
           flex-wrap: wrap;
@@ -1825,12 +2064,23 @@ export default function App() {
         .moneyInput span {
           color: var(--green);
           font-weight: 800;
+          white-space: nowrap;
         }
 
         .moneyInput input {
           border: none;
           background: transparent;
           box-shadow: none;
+        }
+
+        .oddsInput span {
+          color: var(--teal);
+        }
+
+        .helperText {
+          margin-top: 6px;
+          color: var(--muted);
+          font-size: 12px;
         }
 
         .autocompleteBox {
@@ -1864,7 +2114,8 @@ export default function App() {
           gap: 14px;
         }
 
-        .betCard {
+        .betCard,
+        .boardCard {
           position: relative;
           overflow: hidden;
           background:
@@ -1891,7 +2142,8 @@ export default function App() {
           display: none;
         }
 
-        .betRowTop {
+        .betRowTop,
+        .boardRowTop {
           position: relative;
           z-index: 1;
           display: grid;
@@ -1900,30 +2152,35 @@ export default function App() {
           align-items: center;
         }
 
-        .betLeft {
+        .betLeft,
+        .boardLeft {
           min-width: 0;
         }
 
-        .betRight {
+        .betRight,
+        .boardRight {
           display: flex;
           justify-content: flex-end;
           align-items: center;
         }
 
-        .betTitle {
+        .betTitle,
+        .boardTitle {
           font-weight: 900;
           font-size: 19px;
           line-height: 1.2;
           letter-spacing: -0.01em;
         }
 
-        .betSub {
+        .betSub,
+        .boardSub {
           color: var(--muted);
           font-size: 13px;
           margin-top: 7px;
         }
 
-        .betRowBottom {
+        .betRowBottom,
+        .boardRowBottom {
           position: relative;
           z-index: 1;
           display: flex;
@@ -1940,6 +2197,17 @@ export default function App() {
           margin-top: 11px;
           font-size: 13px;
           color: var(--muted);
+        }
+
+        .lineTag {
+          padding: 8px 12px;
+          border-radius: 999px;
+          font-size: 12px;
+          font-weight: 800;
+        }
+
+        .boardInlineBtn {
+          min-width: 140px;
         }
 
         .tableWrap {
@@ -2092,27 +2360,32 @@ export default function App() {
             align-items: stretch;
           }
 
-          .betCard {
+          .betCard,
+          .boardCard {
             padding: 16px;
             border-radius: 24px;
           }
 
-          .betRowTop {
+          .betRowTop,
+          .boardRowTop {
             grid-template-columns: 1fr;
             gap: 14px;
           }
 
-          .betRight {
+          .betRight,
+          .boardRight {
             justify-content: flex-start;
           }
 
-          .betRowBottom {
+          .betRowBottom,
+          .boardRowBottom {
             flex-direction: column;
             gap: 6px;
           }
 
           .miniBtn,
-          .statusPill {
+          .statusPill,
+          .boardInlineBtn {
             min-width: 110px;
             height: 48px;
             font-size: 15px;
@@ -2378,14 +2651,20 @@ export default function App() {
                           <button
                             type="button"
                             className={marketType === "total" ? "radioBtn active" : "radioBtn"}
-                            onClick={() => setMarketType("total")}
+                            onClick={() => {
+                              setMarketType("total");
+                              setClassicOdds("-110");
+                            }}
                           >
                             Total
                           </button>
                           <button
                             type="button"
                             className={marketType === "side" ? "radioBtn active" : "radioBtn"}
-                            onClick={() => setMarketType("side")}
+                            onClick={() => {
+                              setMarketType("side");
+                              setClassicOdds(sidePick === "ml" ? "+100" : "-110");
+                            }}
                           >
                             ML / Spread
                           </button>
@@ -2432,21 +2711,30 @@ export default function App() {
                               <button
                                 type="button"
                                 className={sidePick === "ml" ? "radioBtn active" : "radioBtn"}
-                                onClick={() => setSidePick("ml")}
+                                onClick={() => {
+                                  setSidePick("ml");
+                                  setClassicOdds("+100");
+                                }}
                               >
                                 ML
                               </button>
                               <button
                                 type="button"
                                 className={sidePick === "plus" ? "radioBtn active" : "radioBtn"}
-                                onClick={() => setSidePick("plus")}
+                                onClick={() => {
+                                  setSidePick("plus");
+                                  setClassicOdds("-110");
+                                }}
                               >
                                 +
                               </button>
                               <button
                                 type="button"
                                 className={sidePick === "minus" ? "radioBtn active" : "radioBtn"}
-                                onClick={() => setSidePick("minus")}
+                                onClick={() => {
+                                  setSidePick("minus");
+                                  setClassicOdds("-110");
+                                }}
                               >
                                 -
                               </button>
@@ -2467,6 +2755,22 @@ export default function App() {
                           </div>
                         </div>
                       )}
+
+                      <div className="fieldGroup">
+                        <label>Odds</label>
+                        <div className="moneyInput oddsInput">
+                          <span>US</span>
+                          <input
+                            value={classicOdds}
+                            onChange={(e) => handleClassicOddsChange(e.target.value)}
+                            onBlur={handleClassicOddsBlur}
+                            placeholder={marketType === "total" || sidePick !== "ml" ? "-110" : "+100"}
+                          />
+                        </div>
+                        <div className="helperText">
+                          Moneyline defaults to +100. Spread and total default to -110. Allowed range: -10000 to +10000.
+                        </div>
+                      </div>
                     </>
                   )}
 
@@ -2482,6 +2786,7 @@ export default function App() {
                         />
                       </div>
                     </div>
+
                     <div className="fieldGroup">
                       <label>Win Amount</label>
                       <div className="moneyInput">
@@ -2489,11 +2794,19 @@ export default function App() {
                         <input
                           value={winAmount}
                           onChange={(e) =>
-                            setWinAmount(e.target.value.replace(/[^\d.]/g, ""))
+                            betMode === "custom"
+                              ? setWinAmount(sanitizeMoneyInput(e.target.value))
+                              : null
                           }
+                          readOnly={betMode === "classic"}
                           placeholder="0"
                         />
                       </div>
+                      {betMode === "classic" && (
+                        <div className="helperText">
+                          Auto-calculated from your stake and odds.
+                        </div>
+                      )}
                     </div>
                   </div>
 
@@ -2517,13 +2830,71 @@ export default function App() {
                   </div>
 
                   <div className="sectionBlock">
-                    <h3>Accepted Open Bets</h3>
-                    <div className="scrollList">
-                      {openBetsFeed.slice(0, 14).map((bet) => renderBetCard(bet))}
-                      {!openBetsFeed.length && (
-                        <div className="emptyState">No accepted open bets yet.</div>
-                      )}
+                    <div className="pageHeader" style={{ marginBottom: 10 }}>
+                      <h2>Today's Classic Bet Board</h2>
                     </div>
+
+                    <div className="boardMetaRow" style={{ marginBottom: 12 }}>
+                      <div className="lineTag">College Basketball</div>
+                      <div className="lineTag">MLB</div>
+                      <div className="lineTag">NHL</div>
+                    </div>
+
+                    {todayBoardLoading ? (
+                      <div className="emptyState">Loading today's board...</div>
+                    ) : todayBoard.length ? (
+                      <div className="scrollList">
+                        {todayBoard.slice(0, 12).map((item, index) => (
+                          <div className="boardCard" key={item.id || `${item.home_team || item.homeTeam}-${item.away_team || item.awayTeam}-${index}`}>
+                            <div className="betGlow" />
+                            <div className="boardRowTop">
+                              <div className="boardLeft">
+                                <div className="boardTitle">
+                                  {item.home_team || item.homeTeam} vs {item.away_team || item.awayTeam}
+                                </div>
+                                <div className="boardSub">
+                                  {item.sport_title || item.sportTitle || "Classic Bet"}
+                                </div>
+                              </div>
+
+                              <div className="boardRight">
+                                <button
+                                  className="greenBtn boardInlineBtn"
+                                  onClick={() => handleUseBoardLine(item)}
+                                >
+                                  Use This Line
+                                </button>
+                              </div>
+                            </div>
+
+                            <div className="boardRowBottom">
+                              <span>
+                                <strong>Market:</strong>{" "}
+                                {item.marketType === "total"
+                                  ? `Total • ${(item.totalPick || "over").toUpperCase()} ${item.totalNumber || ""}`
+                                  : item.sidePick === "ml"
+                                  ? "Moneyline"
+                                  : `Spread • ${item.sidePick === "plus" ? "+" : "-"}${item.sideNumber || ""}`}
+                              </span>
+                              <span>
+                                <strong>Odds:</strong> {formatOddsForDisplay(item.odds || "+100")}
+                              </span>
+                              {(item.commence_time || item.commenceTime) && (
+                                <span>
+                                  <strong>Start:</strong>{" "}
+                                  {new Date(item.commence_time || item.commenceTime).toLocaleString()}
+                                </span>
+                              )}
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    ) : (
+                      <div className="emptyState">
+                        {todayBoardError ||
+                          "No board data loaded yet. When you hook up your combined odds endpoint, today's lines will appear here."}
+                      </div>
+                    )}
                   </div>
 
                   <div className="sectionBlock">
@@ -2570,6 +2941,16 @@ export default function App() {
                           )}
                         </tbody>
                       </table>
+                    </div>
+                  </div>
+
+                  <div className="sectionBlock">
+                    <h3>Accepted Open Bets</h3>
+                    <div className="scrollList">
+                      {openBetsFeed.slice(0, 14).map((bet) => renderBetCard(bet))}
+                      {!openBetsFeed.length && (
+                        <div className="emptyState">No accepted open bets yet.</div>
+                      )}
                     </div>
                   </div>
                 </section>
