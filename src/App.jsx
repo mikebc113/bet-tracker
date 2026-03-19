@@ -1,8 +1,9 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { supabase } from "./supabase";
 
 const filters = ["Day", "Month", "Year", "All Time"];
-const TODAY_BOARD_CACHE_KEY = "settleup_today_board_cache_v1";
+const TODAY_BOARD_CACHE_KEY = "settleup_today_board_cache_v2";
+const BOARD_PAGE_SIZE = 10;
 
 function currency(value) {
   const num = Number(value || 0);
@@ -90,7 +91,7 @@ function normalizeOdds(value) {
 
 function formatOddsForDisplay(odds) {
   const normalized = normalizeOdds(odds);
-  return normalized || "+100";
+  return normalized || "";
 }
 
 function oddsToNumber(odds) {
@@ -172,7 +173,7 @@ function parseBetPayload(text) {
       ...parsed,
       odds:
         parsed.kind === "classic"
-          ? formatOddsForDisplay(parsed.odds || "+100")
+          ? formatOddsForDisplay(parsed.odds || "")
           : null,
     };
   }
@@ -227,7 +228,7 @@ function getBetHeadlineForViewer(bet, currentUserId) {
 
   if (payload.kind === "custom") return payload.details || "Custom Bet";
 
-  const oddsText = payload.odds ? ` @ ${formatOddsForDisplay(payload.odds)}` : "";
+  const oddsText = payload.odds ? ` @ ${payload.odds}` : "";
 
   if (payload.marketType === "total") {
     return `${payload.takingTeam} vs ${payload.againstTeam} • ${
@@ -555,7 +556,18 @@ function formatLineNumber(value) {
   return String(Math.abs(num)).replace(/\.0$/, "");
 }
 
-function isCollegeBasketballItem(item) {
+function findMarket(bookmakers, marketKey) {
+  if (!Array.isArray(bookmakers)) return null;
+
+  for (const bookmaker of bookmakers) {
+    const market = bookmaker?.markets?.find((m) => m.key === marketKey);
+    if (market) return market;
+  }
+
+  return null;
+}
+
+function isBasketballItem(item) {
   const joined = [
     item?.sport_key,
     item?.sportKey,
@@ -568,23 +580,16 @@ function isCollegeBasketballItem(item) {
     .join(" ")
     .toLowerCase();
 
-  return (
-    joined.includes("basketball_ncaab") ||
-    joined.includes("college basketball") ||
-    joined.includes("ncaab") ||
-    joined.includes("ncaa basketball")
-  );
+  return joined.includes("basketball");
 }
 
 function extractMoneyline(item) {
   const homeTeam = item.home_team || item.homeTeam;
   const awayTeam = item.away_team || item.awayTeam;
 
-  const h2hMarket = Array.isArray(item?.bookmakers)
-    ? item.bookmakers[0]?.markets?.find((m) => m.key === "h2h")
-    : null;
+  const h2hMarket = findMarket(item?.bookmakers, "h2h");
 
-  const home = firstDefined(
+  const homeRaw = firstDefined(
     item?.home_moneyline,
     item?.homeMoneyline,
     item?.ml_home,
@@ -595,7 +600,7 @@ function extractMoneyline(item) {
     h2hMarket?.outcomes?.find((o) => o.name === homeTeam)?.price
   );
 
-  const away = firstDefined(
+  const awayRaw = firstDefined(
     item?.away_moneyline,
     item?.awayMoneyline,
     item?.ml_away,
@@ -607,8 +612,8 @@ function extractMoneyline(item) {
   );
 
   return {
-    home: formatOddsForDisplay(home || "+100"),
-    away: formatOddsForDisplay(away || "+100"),
+    home: formatOddsForDisplay(homeRaw),
+    away: formatOddsForDisplay(awayRaw),
   };
 }
 
@@ -616,9 +621,7 @@ function extractSpread(item) {
   const homeTeam = item.home_team || item.homeTeam;
   const awayTeam = item.away_team || item.awayTeam;
 
-  const spreadMarket = Array.isArray(item?.bookmakers)
-    ? item.bookmakers[0]?.markets?.find((m) => m.key === "spreads")
-    : null;
+  const spreadMarket = findMarket(item?.bookmakers, "spreads");
 
   let homePoint = toNumberOrBlank(
     firstDefined(
@@ -664,9 +667,7 @@ function extractSpread(item) {
 }
 
 function extractTotal(item) {
-  const totalMarket = Array.isArray(item?.bookmakers)
-    ? item.bookmakers[0]?.markets?.find((m) => m.key === "totals")
-    : null;
+  const totalMarket = findMarket(item?.bookmakers, "totals");
 
   const point = firstDefined(
     item?.total,
@@ -687,7 +688,7 @@ function extractTotal(item) {
 
 function normalizeBoardGames(items) {
   return items
-    .filter((item) => isCollegeBasketballItem(item))
+    .filter((item) => isBasketballItem(item))
     .map((item, index) => {
       const homeTeam = item.home_team || item.homeTeam || "Home";
       const awayTeam = item.away_team || item.awayTeam || "Away";
@@ -698,7 +699,7 @@ function normalizeBoardGames(items) {
         awayTeam,
         homeLogo: getTeamLogoFromItem(item, "home"),
         awayLogo: getTeamLogoFromItem(item, "away"),
-        sportTitle: item.sport_title || item.sportTitle || "College Basketball",
+        sportTitle: item.sport_title || item.sportTitle || "Basketball",
         commenceTime: item.commence_time || item.commenceTime || "",
         moneyline: extractMoneyline(item),
         spread: extractSpread(item),
@@ -785,6 +786,9 @@ export default function App() {
   const [todayBoardLoading, setTodayBoardLoading] = useState(false);
   const [todayBoardError, setTodayBoardError] = useState("");
   const [boardHasAnyMissingLogos, setBoardHasAnyMissingLogos] = useState(false);
+  const [visibleBoardCount, setVisibleBoardCount] = useState(BOARD_PAGE_SIZE);
+
+  const boardLoadMoreRef = useRef(null);
 
   const authUser = session?.user || null;
 
@@ -817,6 +821,11 @@ export default function App() {
         (b) => validUserIds.has(b.proposerId) && validUserIds.has(b.acceptorId)
       ),
     [bets, validUserIds]
+  );
+
+  const visibleTodayBoard = useMemo(
+    () => todayBoard.slice(0, visibleBoardCount),
+    [todayBoard, visibleBoardCount]
   );
 
   useEffect(() => {
@@ -857,7 +866,7 @@ export default function App() {
     setWinAmount(calculateWinAmount(betAmount, classicOdds));
   }, [betMode, betAmount, classicOdds]);
 
-    useEffect(() => {
+  useEffect(() => {
     setBoardWinAmount(calculateWinAmount(boardBetAmount, boardClassicOdds));
   }, [boardBetAmount, boardClassicOdds]);
 
@@ -870,7 +879,7 @@ export default function App() {
     }
 
     if (sidePick === "ml") {
-      if (!classicOdds || classicOdds === "-110") setClassicOdds("+100");
+      if (!classicOdds) setClassicOdds("+100");
       return;
     }
 
@@ -885,12 +894,12 @@ export default function App() {
       return;
     }
 
-    if (boardSidePick !== "ml") {
-      if (boardClassicOdds !== "+100") setBoardClassicOdds("+100");
+    if (boardSidePick !== "ml" && boardClassicOdds !== "+100") {
+      setBoardClassicOdds("+100");
     }
   }, [boardMarketType, boardSidePick, boardClassicOdds]);
 
-     useEffect(() => {
+  useEffect(() => {
     const configuredBoardUrl = import.meta.env.VITE_COMBINED_ODDS_ENDPOINT;
 
     if (!configuredBoardUrl) {
@@ -908,6 +917,7 @@ export default function App() {
       setBoardHasAnyMissingLogos(
         normalized.some((game) => !game.homeLogo || !game.awayLogo)
       );
+      setVisibleBoardCount(BOARD_PAGE_SIZE);
       return;
     }
 
@@ -932,6 +942,7 @@ export default function App() {
         setBoardHasAnyMissingLogos(
           normalized.some((game) => !game.homeLogo || !game.awayLogo)
         );
+        setVisibleBoardCount(BOARD_PAGE_SIZE);
 
         localStorage.setItem(
           TODAY_BOARD_CACHE_KEY,
@@ -949,6 +960,56 @@ export default function App() {
     loadTodayBoard();
   }, []);
 
+  useEffect(() => {
+    if (!todayBoard.length) return;
+
+    const node = boardLoadMoreRef.current;
+    if (!node) return;
+
+    const observer = new IntersectionObserver(
+      (entries) => {
+        const first = entries[0];
+        if (!first?.isIntersecting) return;
+
+        setVisibleBoardCount((prev) =>
+          Math.min(prev + BOARD_PAGE_SIZE, todayBoard.length)
+        );
+      },
+      {
+        root: null,
+        rootMargin: "300px",
+        threshold: 0,
+      }
+    );
+
+    observer.observe(node);
+
+    return () => observer.disconnect();
+  }, [todayBoard.length, visibleBoardCount]);
+
+  useEffect(() => {
+    if (!todayBoard.length) return;
+    if (visibleBoardCount > todayBoard.length) {
+      setVisibleBoardCount(todayBoard.length);
+    }
+  }, [todayBoard, visibleBoardCount]);
+
+  useEffect(() => {
+    async function boot() {
+      if (!authUser) {
+        setUsers([]);
+        setBets([]);
+        setProfilesLoading(false);
+        setBetsLoading(false);
+        return;
+      }
+
+      await ensureCurrentProfile(authUser);
+      await Promise.all([loadProfiles(), loadBets()]);
+    }
+
+    boot();
+  }, [authUser]);
   async function ensureCurrentProfile(user) {
     if (!user) return;
 
@@ -1027,23 +1088,6 @@ export default function App() {
     await supabase.from("bets").delete().in("id", orphanIds);
     setBets((prev) => prev.filter((b) => !orphanIds.includes(b.id)));
   }
-
-  useEffect(() => {
-    async function boot() {
-      if (!authUser) {
-        setUsers([]);
-        setBets([]);
-        setProfilesLoading(false);
-        setBetsLoading(false);
-        return;
-      }
-
-      await ensureCurrentProfile(authUser);
-      await Promise.all([loadProfiles(), loadBets()]);
-    }
-
-    boot();
-  }, [authUser]);
 
   useEffect(() => {
     if (!users.length || !bets.length) return;
@@ -1240,7 +1284,7 @@ export default function App() {
     setWinAmount("");
   }
 
-    function resetBoardBetModal() {
+  function resetBoardBetModal() {
     setCreateBetError("");
     setBoardOpponentSearch("");
     setBoardSelectedOpponentId("");
@@ -1349,7 +1393,7 @@ export default function App() {
           totalNumber: totalNumber.trim(),
           sidePick,
           sideNumber,
-          odds: classicOdds,
+          odds: "+100",
         }),
       };
     }
@@ -1372,7 +1416,7 @@ export default function App() {
     };
   }
 
-    function getBoardCreateBetPayload() {
+  function getBoardCreateBetPayload() {
     if (!boardTakingTeam.trim() || !boardAgainstTeam.trim()) {
       return { error: "Enter both teams." };
     }
@@ -1592,10 +1636,10 @@ export default function App() {
   }
 
   async function deleteBet(betId) {
-  const { error } = await supabase.from("bets").delete().eq("id", betId);
-  if (error) return;
-  setBets((prev) => prev.filter((b) => b.id !== betId));
-}
+    const { error } = await supabase.from("bets").delete().eq("id", betId);
+    if (error) return;
+    setBets((prev) => prev.filter((b) => b.id !== betId));
+  }
 
   async function acceptBet(betId) {
     const updatedAt = getNow();
@@ -1934,7 +1978,7 @@ export default function App() {
     ) : null;
   }
 
-    function openBoardBetModal(selection) {
+  function openBoardBetModal(selection) {
     setCreateBetError("");
     setShowBoardBetModal(true);
     setBoardOpponentSearch("");
@@ -1967,7 +2011,7 @@ export default function App() {
     );
     setBoardClassicOdds(
       selection.sidePick === "ml"
-        ? formatOddsForDisplay(selection.odds || "+100")
+        ? formatOddsForDisplay(selection.odds || "") || "+100"
         : "+100"
     );
   }
@@ -2085,7 +2129,6 @@ export default function App() {
 
   const showLockedState =
     authLoading || !session || profilesLoading || betsLoading;
-
   return (
     <>
       <style>{`
@@ -2102,6 +2145,9 @@ export default function App() {
           --lime: #a7e15f;
           --card: rgba(10, 15, 24, 0.88);
           --soft: rgba(255,255,255,0.045);
+          --stickyOffset: 12px;
+          --topbarHeight: 96px;
+          --homeStickyTop: calc(var(--stickyOffset) + var(--topbarHeight) + 8px);
         }
 
         * { box-sizing: border-box; }
@@ -2170,13 +2216,22 @@ export default function App() {
           grid-template-columns: 1fr auto;
           align-items: start;
           gap: 12px;
+          position: sticky;
+          top: var(--stickyOffset);
+          z-index: 100;
+          padding: 12px 14px;
+          border-radius: 24px;
+          border: 1px solid rgba(255,255,255,0.10);
+          background: rgba(9,13,20,0.96);
+          box-shadow: 0 18px 42px rgba(0,0,0,0.36);
+          backdrop-filter: blur(16px);
         }
 
         .logoCenterWrap {
           display: flex;
           justify-content: center;
           align-items: center;
-          min-height: 88px;
+          min-height: 56px;
           position: relative;
         }
 
@@ -2278,7 +2333,7 @@ export default function App() {
           border: 1px solid rgba(255,255,255,0.08);
           border-radius: 18px;
           overflow: hidden;
-          z-index: 30;
+          z-index: 130;
           box-shadow: 0 18px 45px rgba(0,0,0,0.48);
           backdrop-filter: blur(18px);
         }
@@ -2447,7 +2502,7 @@ export default function App() {
           justify-content: center;
           align-items: center;
           padding: 18px;
-          z-index: 100;
+          z-index: 150;
         }
 
         .modal {
@@ -2474,172 +2529,25 @@ export default function App() {
           max-width: 540px;
         }
 
-                .boardBetModal {
+        .boardBetModal {
           max-width: 470px;
           max-height: min(82vh, 700px);
           padding: 16px;
         }
 
-                .modalTitle {
+        .modalTitle {
           margin: 10px 0 10px 0;
           font-size: 28px;
           font-weight: 900;
           text-align: center;
         }
-          .boardList {
-  gap: 10px;
-}
-
-.boardGameCard {
-  background: rgba(10, 14, 20, 0.92);
-  border: 1px solid rgba(255,255,255,0.08);
-  border-radius: 14px;
-  padding: 8px 10px 10px;
-  box-shadow: inset 0 0 0 1px rgba(255,255,255,0.015);
-}
-
-.boardHeaderRow {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) 270px;
-  align-items: center;
-  gap: 10px;
-  margin-bottom: 6px;
-}
-
-.boardHeaderLeft {
-  font-size: 10px;
-  color: #c7cfda;
-  opacity: 0.9;
-}
-
-.boardHeaderMarkets {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 6px;
-}
-
-.boardHeaderCell {
-  text-align: center;
-  font-size: 9px;
-  color: #b3bcc7;
-  opacity: 0.85;
-}
-
-.boardTeamRow {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) 270px;
-  gap: 10px;
-  align-items: center;
-  margin-bottom: 6px;
-}
-
-.boardTeamInfo {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  min-width: 0;
-}
-
-.boardTeamName {
-  font-size: 12px;
-  font-weight: 800;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.boardMarketGrid {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 6px;
-}
-
-.boardMarketCell {
-  border: 1px solid rgba(255,255,255,0.08);
-  background: rgba(255,255,255,0.04);
-  color: #edf2f7;
-  border-radius: 8px;
-  min-height: 34px;
-  padding: 5px 4px;
-  display: flex;
-  flex-direction: column;
-  justify-content: center;
-  align-items: center;
-  cursor: pointer;
-  box-shadow: inset 0 0 0 1px rgba(255,255,255,0.015);
-}
-
-.boardMarketCell:hover {
-  background: rgba(255,255,255,0.08);
-  border-color: rgba(70,215,255,0.22);
-}
-
-.boardMainValue {
-  font-size: 11px;
-  font-weight: 800;
-  line-height: 1;
-}
-
-.boardSubValue {
-  margin-top: 3px;
-  font-size: 9px;
-  color: #9ee3b0;
-  line-height: 1;
-  min-height: 9px;
-}
-
-.boardFooterRow {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  margin-top: 4px;
-  font-size: 10px;
-  color: #97a1ae;
-}
-
-.boardLiveDot {
-  width: 10px;
-  height: 10px;
-  border-radius: 999px;
-  background: rgba(38,207,96,0.16);
-  border: 1px solid rgba(38,207,96,0.55);
-  position: relative;
-  flex: 0 0 10px;
-}
-
-.boardLiveDot::after {
-  content: "";
-  position: absolute;
-  inset: 2px;
-  border-radius: 999px;
-  background: var(--green);
-}
-
-.boardBetModal .teamLogoWrap.large {
-  width: 42px;
-  height: 42px;
-  flex: 0 0 42px;
-}
-
-.boardLogoRow {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-}
-
-.logoVs {
-  font-size: 12px;
-  font-weight: 900;
-  color: var(--muted);
-  letter-spacing: 0.08em;
-}
 
         .boardBetModal .modalTitle {
           font-size: 22px;
           margin: 8px 0 6px 0;
         }
 
-                .modalCopy {
+        .modalCopy {
           color: var(--muted);
           text-align: center;
           margin: 0 0 12px 0;
@@ -2673,7 +2581,7 @@ export default function App() {
           font-weight: 600;
         }
 
-                input,
+        input,
         textarea {
           width: 100%;
           padding: 13px 14px;
@@ -2713,7 +2621,7 @@ export default function App() {
           gap: 10px;
         }
 
-                .moneyInput {
+        .moneyInput {
           display: flex;
           align-items: center;
           gap: 8px;
@@ -2780,8 +2688,7 @@ export default function App() {
           gap: 14px;
         }
 
-        .betCard,
-        .boardCard {
+        .betCard {
           position: relative;
           overflow: hidden;
           background:
@@ -2791,12 +2698,6 @@ export default function App() {
           border-radius: 30px;
           padding: 20px 24px;
           box-shadow: inset 0 0 0 1px rgba(255,255,255,0.015);
-        }
-
-                .boardRowTop,
-        .boardRowTop {
-          gap: 10px;
-          align-items: center;
         }
 
         .betGlow {
@@ -2814,8 +2715,7 @@ export default function App() {
           display: none;
         }
 
-        .betRowTop,
-        .boardRowTop {
+        .betRowTop {
           position: relative;
           z-index: 1;
           display: grid;
@@ -2824,50 +2724,30 @@ export default function App() {
           align-items: center;
         }
 
-        .boardCard.condensed .boardRowTop {
-          gap: 10px;
-          align-items: center;
-        }
-
-        .betLeft,
-        .boardLeft {
+        .betLeft {
           min-width: 0;
         }
 
-        .betRight,
-        .boardRight {
+        .betRight {
           display: flex;
           justify-content: flex-end;
           align-items: center;
         }
 
-        .betTitle,
-        .boardTitle {
+        .betTitle {
           font-weight: 900;
           font-size: 19px;
           line-height: 1.2;
           letter-spacing: -0.01em;
         }
 
-        .boardCard.condensed .boardTitle {
-          font-size: 15px;
-          line-height: 1.1;
-        }
-
-        .betSub,
-        .boardSub {
+        .betSub {
           color: var(--muted);
           font-size: 13px;
           margin-top: 7px;
         }
 
-        .boardCard.condensed .boardSub {
-          font-size: 11px;
-          margin-top: 3px;
-        }
-
-        .betRowBottom,
-        .boardRowBottom {
+        .betRowBottom {
           position: relative;
           z-index: 1;
           display: flex;
@@ -2876,58 +2756,6 @@ export default function App() {
           color: #e1e7ee;
           font-size: 14px;
           margin-top: 14px;
-        }
-
-        .boardCard.condensed .boardRowBottom {
-          gap: 8px 16px;
-          margin-top: 8px;
-          font-size: 12px;
-        }
-
-        .boardMatchup {
-          display: flex;
-          align-items: center;
-          gap: 10px;
-          min-width: 0;
-        }
-
-        .teamStack {
-          display: flex;
-          flex-direction: column;
-          gap: 7px;
-          min-width: 0;
-          flex: 1;
-        }
-
-        .teamRow {
-          display: flex;
-          align-items: center;
-          gap: 8px;
-          min-width: 0;
-        }
-
-        .teamText {
-          min-width: 0;
-          display: flex;
-          align-items: center;
-          justify-content: space-between;
-          gap: 10px;
-          width: 100%;
-        }
-
-        .teamName {
-          font-size: 13px;
-          font-weight: 800;
-          white-space: nowrap;
-          overflow: hidden;
-          text-overflow: ellipsis;
-        }
-
-        .teamMarket {
-          font-size: 12px;
-          color: var(--muted);
-          white-space: nowrap;
-          font-weight: 700;
         }
 
         .teamLogoWrap {
@@ -2943,6 +2771,12 @@ export default function App() {
           flex: 0 0 28px;
         }
 
+        .teamLogoWrap.large {
+          width: 42px;
+          height: 42px;
+          flex: 0 0 42px;
+        }
+
         .teamLogoWrap.fallback {
           font-size: 10px;
           font-weight: 900;
@@ -2955,45 +2789,6 @@ export default function App() {
           height: 100%;
           object-fit: contain;
           background: white;
-        }
-        .teamLogo {
-  width: 100%;
-  height: 100%;
-  object-fit: contain;
-  background: white;
-}
-        .vsPill {
-          font-size: 10px;
-          font-weight: 900;
-          letter-spacing: 0.08em;
-          color: var(--muted);
-          border: 1px solid rgba(255,255,255,0.08);
-          background: rgba(255,255,255,0.04);
-          padding: 5px 7px;
-          border-radius: 999px;
-        }
-
-        .compactMeta {
-          position: relative;
-          z-index: 1;
-          margin-top: 11px;
-          font-size: 13px;
-          color: var(--muted);
-        }
-
-        .lineTag {
-          padding: 8px 12px;
-          border-radius: 999px;
-          font-size: 12px;
-          font-weight: 800;
-        }
-
-        .boardInlineBtn {
-          min-width: 116px;
-          height: 38px;
-          border-radius: 14px;
-          padding: 0 14px;
-          font-size: 13px;
         }
 
         .tableWrap {
@@ -3154,19 +2949,229 @@ export default function App() {
           font-size: 13px;
         }
 
+        .softText {
+          color: var(--muted);
+        }
+
+        .compactMeta {
+          margin-top: 11px;
+          font-size: 13px;
+          color: var(--muted);
+        }
+
+        .homePage {
+          max-width: 1220px;
+          margin: 0 auto;
+        }
+
+        .homeStickyWrap {
+          position: sticky;
+          top: var(--homeStickyTop);
+          z-index: 90;
+          background: rgba(7,10,15,0.98);
+          border-radius: 24px;
+          padding: 0;
+          margin-bottom: 14px;
+        }
+
+        .homeStickyPanel {
+          display: grid;
+          gap: 10px;
+          padding: 12px;
+          border-radius: 24px;
+          background: rgba(9,13,20,0.98);
+          border: 1px solid rgba(255,255,255,0.08);
+          box-shadow: 0 18px 40px rgba(0,0,0,0.34);
+        }
+
+        .homeStickyRow {
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          gap: 12px;
+        }
+
+        .homeStickyUserBlock {
+          min-width: 0;
+        }
+
+        .homeStickyEyebrow {
+          color: var(--muted);
+          font-size: 12px;
+          margin-bottom: 4px;
+        }
+
+        .homeStickyUser {
+          font-size: 16px;
+          font-weight: 800;
+          white-space: nowrap;
+          overflow: hidden;
+          text-overflow: ellipsis;
+        }
+
+        .homeStickyBoardTitle {
+          font-size: 20px;
+          font-weight: 900;
+          margin: 0;
+        }
+
+        .homeStickyMeta {
+          color: var(--muted);
+          font-size: 12px;
+          white-space: nowrap;
+        }
+
+        .homeCard {
+          overflow: visible;
+        }
+
+        .boardList {
+          display: grid;
+          gap: 10px;
+        }
+
+        .boardGameCard {
+          background: rgba(10, 14, 20, 0.92);
+          border: 1px solid rgba(255,255,255,0.08);
+          border-radius: 14px;
+          padding: 8px 10px 10px;
+          box-shadow: inset 0 0 0 1px rgba(255,255,255,0.015);
+        }
+
+        .boardHeaderRow {
+          display: grid;
+          grid-template-columns: minmax(0, 1fr) 300px;
+          align-items: center;
+          gap: 10px;
+          margin-bottom: 6px;
+        }
+
+        .boardHeaderLeft {
+          font-size: 10px;
+          color: #c7cfda;
+          opacity: 0.9;
+          font-weight: 700;
+          letter-spacing: 0.02em;
+        }
+
+        .boardHeaderMarkets {
+          display: grid;
+          grid-template-columns: repeat(3, minmax(0, 1fr));
+          gap: 6px;
+        }
+
+        .boardHeaderCell {
+          text-align: center;
+          font-size: 9px;
+          color: #b3bcc7;
+          opacity: 0.85;
+          font-weight: 800;
+          letter-spacing: 0.08em;
+        }
+
+        .boardTeamRow {
+          display: grid;
+          grid-template-columns: minmax(0, 1fr) 300px;
+          gap: 10px;
+          align-items: center;
+          margin-bottom: 6px;
+        }
+
+        .boardTeamRow:last-of-type {
+          margin-bottom: 0;
+        }
+
+        .boardTeamInfo {
+          display: flex;
+          align-items: center;
+          gap: 8px;
+          min-width: 0;
+        }
+
+        .boardTeamName {
+          font-size: 12px;
+          font-weight: 800;
+          white-space: nowrap;
+          overflow: hidden;
+          text-overflow: ellipsis;
+        }
+
+        .boardMarketGrid {
+          display: grid;
+          grid-template-columns: repeat(3, minmax(0, 1fr));
+          gap: 6px;
+        }
+
+        .boardMarketCell {
+          border: 1px solid rgba(255,255,255,0.08);
+          background: rgba(255,255,255,0.04);
+          color: #edf2f7;
+          border-radius: 8px;
+          min-height: 38px;
+          padding: 5px 4px;
+          display: flex;
+          flex-direction: column;
+          justify-content: center;
+          align-items: center;
+          cursor: pointer;
+          box-shadow: inset 0 0 0 1px rgba(255,255,255,0.015);
+        }
+
+        .boardMarketCell:hover {
+          background: rgba(255,255,255,0.08);
+          border-color: rgba(70,215,255,0.22);
+        }
+
+        .boardMainValue {
+          font-size: 11px;
+          font-weight: 800;
+          line-height: 1;
+        }
+
+        .boardSubValue {
+          margin-top: 3px;
+          font-size: 9px;
+          color: #9ee3b0;
+          line-height: 1;
+          min-height: 9px;
+        }
+
+        .boardLoadMoreSentinel {
+          height: 4px;
+        }
+
         @media (max-width: 900px) {
           .logoTitle {
             font-size: 40px;
           }
         }
 
+        @media (max-width: 980px) {
+          .boardHeaderRow,
+          .boardTeamRow {
+            grid-template-columns: minmax(0, 1fr);
+          }
+
+          .boardHeaderMarkets,
+          .boardMarketGrid {
+            width: 100%;
+          }
+        }
+
         @media (max-width: 760px) {
+          :root {
+            --stickyOffset: 8px;
+            --topbarHeight: 88px;
+          }
+
           .appShell {
             padding: 12px;
           }
 
           .topbar {
             grid-template-columns: 1fr auto;
+            padding: 10px 12px;
+            border-radius: 20px;
           }
 
           .twoCol,
@@ -3174,50 +3179,30 @@ export default function App() {
             grid-template-columns: 1fr;
           }
 
-          .pageHeader {
-            flex-direction: column;
-            align-items: stretch;
-          }
-
-          .betCard,
-          .boardCard {
+          .betCard {
             padding: 16px;
             border-radius: 24px;
           }
 
-          .boardCard.condensed {
-            padding: 12px;
-            border-radius: 18px;
-          }
-
-          .betRowTop,
-          .boardRowTop {
+          .betRowTop {
             grid-template-columns: 1fr;
             gap: 14px;
           }
 
-          .betRight,
-          .boardRight {
+          .betRight {
             justify-content: flex-start;
           }
 
-          .betRowBottom,
-          .boardRowBottom {
+          .betRowBottom {
             flex-direction: column;
             gap: 6px;
           }
 
           .miniBtn,
-          .statusPill,
-          .boardInlineBtn {
+          .statusPill {
             min-width: 110px;
             height: 48px;
             font-size: 15px;
-          }
-
-          .boardInlineBtn {
-            height: 40px;
-            font-size: 13px;
           }
 
           .logoTitle {
@@ -3233,80 +3218,78 @@ export default function App() {
             font-size: 11px;
           }
 
-          .teamName {
-            font-size: 12px;
+          .homeStickyRow {
+            flex-direction: column;
+            align-items: stretch;
           }
 
-          .teamMarket {
+          .homeStickyMeta {
+            white-space: normal;
+          }
+
+          .boardGameCard {
+            padding: 10px;
+          }
+
+          .boardHeaderMarkets,
+          .boardMarketGrid {
+            grid-template-columns: repeat(3, minmax(0, 1fr));
+            gap: 5px;
+          }
+
+          .boardHeaderCell {
+            font-size: 8px;
+          }
+
+          .boardTeamName {
             font-size: 11px;
           }
+
+          .boardMainValue {
+            font-size: 10px;
+          }
+
+          .boardSubValue {
+            font-size: 8px;
+          }
+
+          .boardBetModal {
+            max-width: 100%;
+            padding: 14px;
+          }
+
+          .boardModalGameHeader {
+            flex-direction: column;
+            align-items: flex-start;
+          }
         }
-          /* ===== Board Responsive Fixes ===== */
-
-@media (max-width: 980px) {
-  .boardGrid {
-    grid-template-columns: 1fr;
-  }
-}
-
-@media (max-width: 980px) {
-  .boardHeaderRow,
-  .boardTeamRow {
-    grid-template-columns: minmax(0, 1fr);
-  }
-
-  .boardHeaderMarkets,
-  .boardMarketGrid {
-    width: 100%;
-  }
-}
-
-@media (max-width: 760px) {
-  .boardGameCard {
-    padding: 10px;
-  }
-
-  .boardHeaderMarkets,
-  .boardMarketGrid {
-    grid-template-columns: repeat(3, minmax(0, 1fr));
-    gap: 5px;
-  }
-
-  .boardHeaderCell {
-    font-size: 8px;
-  }
-
-  .boardTeamName {
-    font-size: 11px;
-  }
-
-  .boardMainValue {
-    font-size: 10px;
-  }
-
-  .boardSubValue {
-    font-size: 8px;
-  }
-
-  .boardBetModal {
-    max-width: 100%;
-    padding: 14px;
-  }
-
-  .boardModalGameHeader {
-    flex-direction: column;
-    align-items: flex-start;
-  }
-
-  .boardLogoRow {
-    width: 100%;
-    justify-content: flex-start;
-  }
-}
-
-`}</style>
+      `}</style>
 
       <div className="appShell">
+        <header className="topbar">
+          <div className="logoCenterWrap">
+            <SettleUpLogo centered />
+            <div className="headerGlow" />
+          </div>
+
+          <div className="menuWrap" onClick={(e) => e.stopPropagation()}>
+            <button className="menuBtn" onClick={() => setMenuOpen((p) => !p)}>
+              ☰
+            </button>
+
+            {menuOpen && (
+              <div className="menuPanel">
+                <button onClick={() => goToPage("home")}>Home</button>
+                <button onClick={() => goToPage("account")}>My Account</button>
+                <button onClick={() => goToPage("mybets")}>My Bets</button>
+                <button onClick={() => goToPage("settleup")}>Settle Up</button>
+                <button onClick={() => goToPage("history")}>Bet History</button>
+                <button onClick={handleLogout}>Logout</button>
+              </div>
+            )}
+          </div>
+        </header>
+
         {showLockedState ? (
           <div className="shellFade">
             {renderSkeletonScreen()}
@@ -3414,31 +3397,7 @@ export default function App() {
             )}
           </div>
         ) : (
-          <div className={`shellFade ${pageLoading ? "pageLoading" : ""}`}>
-            <header className="topbar">
-              <div className="logoCenterWrap">
-                <SettleUpLogo centered />
-                <div className="headerGlow" />
-              </div>
-
-              <div className="menuWrap" onClick={(e) => e.stopPropagation()}>
-                <button className="menuBtn" onClick={() => setMenuOpen((p) => !p)}>
-                  ☰
-                </button>
-
-                {menuOpen && (
-                  <div className="menuPanel">
-                    <button onClick={() => goToPage("home")}>Home</button>
-                    <button onClick={() => goToPage("account")}>My Account</button>
-                    <button onClick={() => goToPage("mybets")}>My Bets</button>
-                    <button onClick={() => goToPage("settleup")}>Settle Up</button>
-                    <button onClick={() => goToPage("history")}>Bet History</button>
-                    <button onClick={handleLogout}>Logout</button>
-                  </div>
-                )}
-              </div>
-            </header>
-
+          <div className={`shellFade ${pageLoading ? "pageLoading" : ""}`} style={{ overflow: "visible" }}>
             {showCreateBetModal && (
               <div className="modalBackdrop">
                 <div className="modal createBetModal">
@@ -3613,7 +3572,6 @@ export default function App() {
                                 className={sidePick === "ml" ? "radioBtn active" : "radioBtn"}
                                 onClick={() => {
                                   setSidePick("ml");
-                                  setClassicOdds("+100");
                                 }}
                               >
                                 ML
@@ -3668,7 +3626,7 @@ export default function App() {
                           />
                         </div>
                         <div className="helperText">
-                          Moneyline defaults to +100. Spread and total also default to +100 here.
+                          Moneyline uses selected odds. Spread and total are always +100.
                         </div>
                       </div>
                     </>
@@ -3719,7 +3677,7 @@ export default function App() {
               </div>
             )}
 
-                        {showBoardBetModal && (
+            {showBoardBetModal && (
               <div className="modalBackdrop">
                 <div className="modal boardBetModal">
                   <button
@@ -3751,7 +3709,7 @@ export default function App() {
                         {boardMarketType === "total"
                           ? `${boardTotalPick === "over" ? "Over" : "Under"} ${boardTotalNumber} • +100`
                           : boardSidePick === "ml"
-                          ? `Moneyline • ${boardClassicOdds}`
+                          ? `Moneyline • ${boardClassicOdds || "+100"}`
                           : `Spread ${boardSidePick === "plus" ? "+" : "-"}${boardSideNumber} • +100`}
                       </div>
                     </div>
@@ -3860,10 +3818,10 @@ export default function App() {
                     <label>Odds</label>
                     <div className="moneyInput oddsInput boardLockedInput">
                       <span>US</span>
-                      <input value={boardClassicOdds} disabled />
+                      <input value={boardClassicOdds || "+100"} disabled />
                     </div>
                     <div className="helperText">
-                      Totals and spreads always stay +100. Moneyline uses the selected side.
+                      Totals and spreads stay +100. Moneyline uses the real board value.
                     </div>
                   </div>
 
@@ -3905,210 +3863,229 @@ export default function App() {
               </div>
             )}
 
-            <main className="pageGrid shellFade">
-              {page === "home" && (
-                <section className="prettyCard">
-                  <div className="pageHeader">
-                    <h2>Home</h2>
-                    <button className="greenBtn" onClick={() => setShowCreateBetModal(true)}>
-                      Create a Bet
-                    </button>
-                  </div>
+            {page === "home" && (
+              <section className="homePage">
+                <div className="homeStickyWrap">
+                  <div className="homeStickyPanel">
+                    <div className="homeStickyRow">
+                      <div className="homeStickyUserBlock">
+                        <div className="homeStickyEyebrow">Logged in as</div>
+                        <div className="homeStickyUser">{currentUser?.username || "User"}</div>
+                      </div>
 
-                                    <div className="sectionBlock">
-  <div className="pageHeader" style={{ marginBottom: 10 }}>
-    <h2>Today's Classic Bet Board</h2>
-  </div>
-
-  {boardHasAnyMissingLogos && (
-    <div className="helperText" style={{ marginBottom: 12 }}>
-      Some team logos were not returned by the API, so those teams are showing initials.
-    </div>
-  )}
-
-  {todayBoardLoading ? (
-    <div className="emptyState">Loading today's board...</div>
-  ) : todayBoard.length ? (
-    <div className="scrollList boardList">
-      {todayBoard.slice(0, 16).map((game) => {
-        const spreadHomeLabel =
-          game.spread.home.sideNumber !== ""
-            ? `${game.spread.home.sidePick === "plus" ? "+" : "-"}${game.spread.home.sideNumber}`
-            : "--";
-
-        const spreadAwayLabel =
-          game.spread.away.sideNumber !== ""
-            ? `${game.spread.away.sidePick === "plus" ? "+" : "-"}${game.spread.away.sideNumber}`
-            : "--";
-
-        const totalNumber = game.total.number || "--";
-        const boardTime = formatBoardTime(game.commenceTime);
-
-        return (
-          <div className="boardGameCard" key={game.id}>
-            <div className="boardHeaderRow">
-              <div className="boardHeaderLeft">Today</div>
-              <div className="boardHeaderMarkets">
-                <div className="boardHeaderCell">Spread</div>
-                <div className="boardHeaderCell">Total</div>
-                <div className="boardHeaderCell">Moneyline</div>
-              </div>
-            </div>
-
-            <div className="boardTeamRow">
-              <div className="boardTeamInfo">
-                <TeamLogo src={game.homeLogo} name={game.homeTeam} />
-                <span className="boardTeamName">{game.homeTeam}</span>
-              </div>
-
-              <div className="boardMarketGrid">
-                <button
-                  className="boardMarketCell"
-                  onClick={() =>
-                    openBoardBetModal({
-                      takingTeam: game.homeTeam,
-                      againstTeam: game.awayTeam,
-                      takingLogo: game.homeLogo,
-                      againstLogo: game.awayLogo,
-                      marketType: "side",
-                      sidePick: game.spread.home.sidePick,
-                      sideNumber: game.spread.home.sideNumber,
-                      odds: "+100",
-                    })
-                  }
-                >
-                  <span className="boardMainValue">{spreadHomeLabel}</span>
-                  <span className="boardSubValue">+100</span>
-                </button>
-
-                <button
-                  className="boardMarketCell"
-                  onClick={() =>
-                    openBoardBetModal({
-                      takingTeam: game.homeTeam,
-                      againstTeam: game.awayTeam,
-                      takingLogo: game.homeLogo,
-                      againstLogo: game.awayLogo,
-                      marketType: "total",
-                      totalPick: "over",
-                      totalNumber,
-                      odds: "+100",
-                    })
-                  }
-                >
-                  <span className="boardMainValue">O {totalNumber}</span>
-                  <span className="boardSubValue">+100</span>
-                </button>
-
-                <button
-                  className="boardMarketCell"
-                  onClick={() =>
-                    openBoardBetModal({
-                      takingTeam: game.homeTeam,
-                      againstTeam: game.awayTeam,
-                      takingLogo: game.homeLogo,
-                      againstLogo: game.awayLogo,
-                      marketType: "side",
-                      sidePick: "ml",
-                      sideNumber: "EVEN",
-                      odds: game.moneyline.home,
-                    })
-                  }
-                >
-                  <span className="boardMainValue">{game.moneyline.home}</span>
-                  <span className="boardSubValue">&nbsp;</span>
-                </button>
-              </div>
-            </div>
-
-            <div className="boardTeamRow">
-              <div className="boardTeamInfo">
-                <TeamLogo src={game.awayLogo} name={game.awayTeam} />
-                <span className="boardTeamName">{game.awayTeam}</span>
-              </div>
-
-              <div className="boardMarketGrid">
-                <button
-                  className="boardMarketCell"
-                  onClick={() =>
-                    openBoardBetModal({
-                      takingTeam: game.awayTeam,
-                      againstTeam: game.homeTeam,
-                      takingLogo: game.awayLogo,
-                      againstLogo: game.homeLogo,
-                      marketType: "side",
-                      sidePick: game.spread.away.sidePick,
-                      sideNumber: game.spread.away.sideNumber,
-                      odds: "+100",
-                    })
-                  }
-                >
-                  <span className="boardMainValue">{spreadAwayLabel}</span>
-                  <span className="boardSubValue">+100</span>
-                </button>
-
-                <button
-                  className="boardMarketCell"
-                  onClick={() =>
-                    openBoardBetModal({
-                      takingTeam: game.awayTeam,
-                      againstTeam: game.homeTeam,
-                      takingLogo: game.awayLogo,
-                      againstLogo: game.homeLogo,
-                      marketType: "total",
-                      totalPick: "under",
-                      totalNumber,
-                      odds: "+100",
-                    })
-                  }
-                >
-                  <span className="boardMainValue">U {totalNumber}</span>
-                  <span className="boardSubValue">+100</span>
-                </button>
-
-                <button
-                  className="boardMarketCell"
-                  onClick={() =>
-                    openBoardBetModal({
-                      takingTeam: game.awayTeam,
-                      againstTeam: game.homeTeam,
-                      takingLogo: game.awayLogo,
-                      againstLogo: game.homeLogo,
-                      marketType: "side",
-                      sidePick: "ml",
-                      sideNumber: "EVEN",
-                      odds: game.moneyline.away,
-                    })
-                  }
-                >
-                  <span className="boardMainValue">{game.moneyline.away}</span>
-                  <span className="boardSubValue">&nbsp;</span>
-                </button>
-              </div>
-            </div>
-
-            <div className="boardFooterRow">
-              <span className="boardLiveDot" />
-              <span>{boardTime || game.sportTitle}</span>
-            </div>
-          </div>
-        );
-      })}
-    </div>
-  ) : (
-    <div className="emptyState">
-      {todayBoardError ||
-        "No college basketball board data loaded yet. If your endpoint uses different field names, send one sample object and I’ll map it exactly."}
-    </div>
-  )}
-</div>
-
-                  <div className="sectionBlock">
-                    <div className="pageHeader" style={{ marginBottom: 10 }}>
-                      <h2>Total Win/Loss Results</h2>
+                      <button className="greenBtn" onClick={() => setShowCreateBetModal(true)}>
+                        Create Bet
+                      </button>
                     </div>
 
-                    <div className="filterRow" style={{ marginBottom: 14 }}>
+                    <div className="homeStickyRow">
+                      <h2 className="homeStickyBoardTitle">Today&apos;s Classic Bet Board</h2>
+                      <div className="homeStickyMeta">
+                        {todayBoardLoading
+                          ? "Loading games..."
+                          : `${todayBoard.length} basketball game${todayBoard.length === 1 ? "" : "s"}`}
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                <section className="prettyCard homeCard">
+                  {todayBoardError ? (
+                    <div className="emptyState">{todayBoardError}</div>
+                  ) : todayBoardLoading && !todayBoard.length ? (
+                    <div className="emptyState">Loading games...</div>
+                  ) : !todayBoard.length ? (
+                    <div className="emptyState">No games available right now.</div>
+                  ) : (
+                    <div className="boardList">
+                      {visibleTodayBoard.map((game, idx) => (
+                        <div key={game.id || idx} className="boardGameCard">
+                          <div className="boardHeaderRow">
+                            <div className="boardHeaderLeft">
+                              {game.sportTitle} • {formatBoardTime(game.commenceTime)}
+                            </div>
+
+                            <div className="boardHeaderMarkets">
+                              <div className="boardHeaderCell">ML</div>
+                              <div className="boardHeaderCell">SPR</div>
+                              <div className="boardHeaderCell">TOT</div>
+                            </div>
+                          </div>
+
+                          <div className="boardTeamRow">
+                            <div className="boardTeamInfo">
+                              <TeamLogo src={game.awayLogo} name={game.awayTeam} />
+                              <div className="boardTeamName">{game.awayTeam}</div>
+                            </div>
+
+                            <div className="boardMarketGrid">
+                              <button
+                                className="boardMarketCell"
+                                onClick={() =>
+                                  openBoardBetModal({
+                                    takingTeam: game.awayTeam,
+                                    againstTeam: game.homeTeam,
+                                    takingLogo: game.awayLogo,
+                                    againstLogo: game.homeLogo,
+                                    marketType: "side",
+                                    sidePick: "ml",
+                                    sideNumber: "EVEN",
+                                    odds: game.moneyline?.away || "+100",
+                                  })
+                                }
+                              >
+                                <div className="boardMainValue">{game.moneyline?.away || "—"}</div>
+                                <div className="boardSubValue">Moneyline</div>
+                              </button>
+
+                              <button
+                                className="boardMarketCell"
+                                onClick={() =>
+                                  openBoardBetModal({
+                                    takingTeam: game.awayTeam,
+                                    againstTeam: game.homeTeam,
+                                    takingLogo: game.awayLogo,
+                                    againstLogo: game.homeLogo,
+                                    marketType: "side",
+                                    sidePick: game.spread?.away?.sidePick || "plus",
+                                    sideNumber: game.spread?.away?.sideNumber || "",
+                                    odds: "+100",
+                                  })
+                                }
+                              >
+                                <div className="boardMainValue">
+                                  {game.spread?.away?.sideNumber
+                                    ? `${game.spread.away.sidePick === "plus" ? "+" : "-"}${game.spread.away.sideNumber}`
+                                    : "—"}
+                                </div>
+                                <div className="boardSubValue">+100</div>
+                              </button>
+
+                              <button
+                                className="boardMarketCell"
+                                onClick={() =>
+                                  openBoardBetModal({
+                                    takingTeam: game.awayTeam,
+                                    againstTeam: game.homeTeam,
+                                    takingLogo: game.awayLogo,
+                                    againstLogo: game.homeLogo,
+                                    marketType: "total",
+                                    totalPick: "over",
+                                    totalNumber: game.total?.number || "",
+                                    odds: "+100",
+                                  })
+                                }
+                              >
+                                <div className="boardMainValue">
+                                  {game.total?.number ? `O ${game.total.number}` : "—"}
+                                </div>
+                                <div className="boardSubValue">+100</div>
+                              </button>
+                            </div>
+                          </div>
+
+                          <div className="boardTeamRow">
+                            <div className="boardTeamInfo">
+                              <TeamLogo src={game.homeLogo} name={game.homeTeam} />
+                              <div className="boardTeamName">{game.homeTeam}</div>
+                            </div>
+
+                            <div className="boardMarketGrid">
+                              <button
+                                className="boardMarketCell"
+                                onClick={() =>
+                                  openBoardBetModal({
+                                    takingTeam: game.homeTeam,
+                                    againstTeam: game.awayTeam,
+                                    takingLogo: game.homeLogo,
+                                    againstLogo: game.awayLogo,
+                                    marketType: "side",
+                                    sidePick: "ml",
+                                    sideNumber: "EVEN",
+                                    odds: game.moneyline?.home || "+100",
+                                  })
+                                }
+                              >
+                                <div className="boardMainValue">{game.moneyline?.home || "—"}</div>
+                                <div className="boardSubValue">Moneyline</div>
+                              </button>
+
+                              <button
+                                className="boardMarketCell"
+                                onClick={() =>
+                                  openBoardBetModal({
+                                    takingTeam: game.homeTeam,
+                                    againstTeam: game.awayTeam,
+                                    takingLogo: game.homeLogo,
+                                    againstLogo: game.awayLogo,
+                                    marketType: "side",
+                                    sidePick: game.spread?.home?.sidePick || "minus",
+                                    sideNumber: game.spread?.home?.sideNumber || "",
+                                    odds: "+100",
+                                  })
+                                }
+                              >
+                                <div className="boardMainValue">
+                                  {game.spread?.home?.sideNumber
+                                    ? `${game.spread.home.sidePick === "plus" ? "+" : "-"}${game.spread.home.sideNumber}`
+                                    : "—"}
+                                </div>
+                                <div className="boardSubValue">+100</div>
+                              </button>
+
+                              <button
+                                className="boardMarketCell"
+                                onClick={() =>
+                                  openBoardBetModal({
+                                    takingTeam: game.homeTeam,
+                                    againstTeam: game.awayTeam,
+                                    takingLogo: game.homeLogo,
+                                    againstLogo: game.awayLogo,
+                                    marketType: "total",
+                                    totalPick: "under",
+                                    totalNumber: game.total?.number || "",
+                                    odds: "+100",
+                                  })
+                                }
+                              >
+                                <div className="boardMainValue">
+                                  {game.total?.number ? `U ${game.total.number}` : "—"}
+                                </div>
+                                <div className="boardSubValue">+100</div>
+                              </button>
+                            </div>
+                          </div>
+                        </div>
+                      ))}
+
+                      {visibleBoardCount < todayBoard.length && (
+                        <div ref={boardLoadMoreRef} className="boardLoadMoreSentinel" />
+                      )}
+                    </div>
+                  )}
+                </section>
+
+                <div className="pageGrid" style={{ marginTop: 18 }}>
+                  <section className="prettyCard">
+                    <div className="pageHeader">
+                      <h2>Open Bets Feed</h2>
+                    </div>
+
+                    <div className="scrollList">
+                      {openBetsFeed.length ? (
+                        openBetsFeed.map((bet) => renderBetCard(bet))
+                      ) : (
+                        <div className="emptyState">No open bets posted right now.</div>
+                      )}
+                    </div>
+                  </section>
+
+                  <section className="prettyCard" style={{ marginTop: 18 }}>
+                    <div className="pageHeader">
+                      <h2>Leaderboard</h2>
+                    </div>
+
+                    <div className="filterRow">
                       {filters.map((filter) => (
                         <button
                           key={filter}
@@ -4120,11 +4097,11 @@ export default function App() {
                       ))}
                     </div>
 
-                    <div className="tableWrap">
+                    <div className="tableWrap sectionBlock">
                       <table>
                         <thead>
                           <tr>
-                            <th>Username</th>
+                            <th>Player</th>
                             <th>Net</th>
                           </tr>
                         </thead>
@@ -4141,28 +4118,20 @@ export default function App() {
                           ) : (
                             <tr>
                               <td colSpan="2" className="emptyCell">
-                                No positive or negative balances in this filter
+                                No leaderboard data for this filter yet.
                               </td>
                             </tr>
                           )}
                         </tbody>
                       </table>
                     </div>
-                  </div>
+                  </section>
+                </div>
+              </section>
+            )}
 
-                  <div className="sectionBlock">
-                    <h3>Accepted Open Bets</h3>
-                    <div className="scrollList">
-                      {openBetsFeed.slice(0, 14).map((bet) => renderBetCard(bet))}
-                      {!openBetsFeed.length && (
-                        <div className="emptyState">No accepted open bets yet.</div>
-                      )}
-                    </div>
-                  </div>
-                </section>
-              )}
-
-              {page === "account" && (
+            {page === "account" && (
+              <div className="pageGrid">
                 <section className="prettyCard">
                   <div className="pageHeader">
                     <h2>My Account</h2>
@@ -4174,6 +4143,7 @@ export default function App() {
                       <input
                         value={accountUsername}
                         onChange={(e) => setAccountUsername(e.target.value)}
+                        placeholder="Username"
                       />
                     </div>
 
@@ -4182,6 +4152,7 @@ export default function App() {
                       <input
                         value={accountEmail}
                         onChange={(e) => setAccountEmail(e.target.value)}
+                        placeholder="Email"
                       />
                     </div>
                   </div>
@@ -4192,6 +4163,7 @@ export default function App() {
                       <input
                         value={accountFirstName}
                         onChange={(e) => setAccountFirstName(e.target.value)}
+                        placeholder="First name"
                       />
                     </div>
 
@@ -4200,6 +4172,7 @@ export default function App() {
                       <input
                         value={accountLastName}
                         onChange={(e) => setAccountLastName(e.target.value)}
+                        placeholder="Last name"
                       />
                     </div>
                   </div>
@@ -4216,132 +4189,142 @@ export default function App() {
                     {savingAccount ? "Saving..." : "Save Account"}
                   </button>
                 </section>
-              )}
+              </div>
+            )}
 
-              {page === "mybets" && (
+            {page === "mybets" && (
+              <div className="pageGrid">
                 <section className="prettyCard">
                   <div className="pageHeader">
                     <h2>My Bets</h2>
                   </div>
 
                   <div className="sectionBlock">
-                    <h3>All Bets You Proposed</h3>
+                    <h3>Proposed by Me</h3>
                     <div className="scrollList">
-                      {myProposedBets.slice(0, 14).map((bet) =>
-                        renderBetCard(bet, { showDelete: true })
-                      )}
-                      {!myProposedBets.length && (
-                        <div className="emptyState">No pending proposed bets.</div>
+                      {myProposedBets.length ? (
+                        myProposedBets.map((bet) => renderBetCard(bet, { showDelete: true }))
+                      ) : (
+                        <div className="emptyState">No bets proposed by you right now.</div>
                       )}
                     </div>
                   </div>
 
                   <div className="sectionBlock">
-                    <h3>Bets Others Proposed To You</h3>
+                    <h3>Proposed to Me</h3>
                     <div className="scrollList">
-                      {proposedToMe.slice(0, 14).map((bet) =>
-                        renderBetCard(bet, { showAcceptDecline: true })
-                      )}
-                      {!proposedToMe.length && (
-                        <div className="emptyState">No bets proposed to you.</div>
+                      {proposedToMe.length ? (
+                        proposedToMe.map((bet) =>
+                          renderBetCard(bet, { showAcceptDecline: true })
+                        )
+                      ) : (
+                        <div className="emptyState">No bets waiting on you right now.</div>
                       )}
                     </div>
                   </div>
 
                   <div className="sectionBlock">
-                    <h3>All Bets Pending</h3>
+                    <h3>Open Bets</h3>
                     <div className="scrollList">
-                      {pendingBets.slice(0, 14).map((bet) =>
-                        renderBetCard(bet, { showGrade: true })
+                      {pendingBets.length ? (
+                        pendingBets.map((bet) => renderBetCard(bet, { showGrade: true }))
+                      ) : (
+                        <div className="emptyState">No open bets right now.</div>
                       )}
-                      {!pendingBets.length && (
-                        <div className="emptyState">No accepted bets waiting on grading.</div>
+                    </div>
+                  </div>
+
+                  <div className="sectionBlock">
+                    <h3>Awaiting Payment</h3>
+                    <div className="scrollList">
+                      {unpaidGradedBets.length ? (
+                        unpaidGradedBets.map((bet) =>
+                          renderBetCard(bet, { showPayment: true })
+                        )
+                      ) : (
+                        <div className="emptyState">No graded unpaid bets right now.</div>
                       )}
                     </div>
                   </div>
                 </section>
-              )}
+              </div>
+            )}
 
-              {page === "settleup" && (
+            {page === "settleup" && (
+              <div className="pageGrid">
                 <section className="prettyCard">
                   <div className="pageHeader">
                     <h2>Settle Up</h2>
                   </div>
 
-                  <div className="sectionBlock">
-                    <h3>Bet Status</h3>
-                    <div className="scrollList">
-                      {unpaidGradedBets.slice(0, 14).map((bet) =>
-                        renderBetCard(bet, { showPayment: true })
-                      )}
-                      {!unpaidGradedBets.length && (
-                        <div className="emptyState">No unpaid graded bets right now.</div>
-                      )}
-                    </div>
-                  </div>
-
-                  <div className="sectionBlock">
-                    <h3>Who Owes Who</h3>
-                    <div className="tableWrap">
-                      <table>
-                        <thead>
-                          <tr>
-                            <th>Username</th>
-                            <th>Balance</th>
-                            <th className="settleCtaCell">Action</th>
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {outstanding.length ? (
-                            outstanding.map((row) => (
-                              <tr key={row.userId}>
-                                <td>{row.username}</td>
-                                <td className={row.net >= 0 ? "greenText" : "redText"}>
-                                  {currency(row.net)}
-                                </td>
-                                <td className="settleCtaCell">
-                                  <button
-                                    className="greenBtn settleInlineBtn"
-                                    onClick={() => settleAllWithUser(row.userId)}
-                                  >
-                                    {row.net < 0 ? "Paid Up in Full!" : "Got Paid in Full!"}
-                                  </button>
-                                </td>
-                              </tr>
-                            ))
-                          ) : (
-                            <tr>
-                              <td colSpan="3" className="emptyCell">
-                                No balances to settle
+                  <div className="tableWrap">
+                    <table>
+                      <thead>
+                        <tr>
+                          <th>Player</th>
+                          <th>Net</th>
+                          <th className="settleCtaCell">Action</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {outstanding.length ? (
+                          outstanding.map((row) => (
+                            <tr key={row.userId}>
+                              <td>{row.username}</td>
+                              <td className={row.net >= 0 ? "greenText" : "redText"}>
+                                {currency(row.net)}
+                              </td>
+                              <td className="settleCtaCell">
+                                <button
+                                  className="greenBtn settleInlineBtn"
+                                  onClick={() => settleAllWithUser(row.userId)}
+                                >
+                                  Settle All
+                                </button>
                               </td>
                             </tr>
-                          )}
-                        </tbody>
-                      </table>
-                    </div>
+                          ))
+                        ) : (
+                          <tr>
+                            <td colSpan="3" className="emptyCell">
+                              Nothing to settle right now.
+                            </td>
+                          </tr>
+                        )}
+                      </tbody>
+                    </table>
+                  </div>
+                </section>
+              </div>
+            )}
+
+            {page === "history" && (
+              <div className="pageGrid">
+                <section className="prettyCard">
+                  <div className="pageHeader">
+                    <h2>Bet History</h2>
+                  </div>
+
+                  <div className="filterRow">
+                    {filters.map((filter) => (
+                      <button
+                        key={filter}
+                        className={historyFilter === filter ? "filterBtn active" : "filterBtn"}
+                        onClick={() => setHistoryFilter(filter)}
+                      >
+                        {filter}
+                      </button>
+                    ))}
                   </div>
 
                   <div className="sectionBlock">
-                    <h3>Head to Head Results</h3>
-
-                    <div className="filterRow" style={{ marginBottom: 14 }}>
-                      {filters.map((filter) => (
-                        <button
-                          key={filter}
-                          className={historyFilter === filter ? "filterBtn active" : "filterBtn"}
-                          onClick={() => setHistoryFilter(filter)}
-                        >
-                          {filter}
-                        </button>
-                      ))}
-                    </div>
-
+                    <h3>Head to Head</h3>
                     <div className="tableWrap">
                       <table>
                         <thead>
                           <tr>
-                            <th>Username</th>
-                            <th>You Are</th>
+                            <th>Player</th>
+                            <th>Net</th>
                           </tr>
                         </thead>
                         <tbody>
@@ -4357,7 +4340,7 @@ export default function App() {
                           ) : (
                             <tr>
                               <td colSpan="2" className="emptyCell">
-                                No graded bets in this filter
+                                No history for this filter yet.
                               </td>
                             </tr>
                           )}
@@ -4365,24 +4348,24 @@ export default function App() {
                       </table>
                     </div>
                   </div>
-                </section>
-              )}
 
-              {page === "history" && (
-                <section className="prettyCard">
-                  <div className="pageHeader">
-                    <h2>Bet History</h2>
-                  </div>
-
-                  <div className="scrollList">
-                    {paidHistory.slice(0, 20).map((bet) => renderBetCard(bet))}
-                    {!paidHistory.length && (
-                      <div className="emptyState">No settled bets yet.</div>
-                    )}
+                  <div className="sectionBlock">
+                    <h3>Settled Bets</h3>
+                    <div className="scrollList">
+                      {paidHistory.filter((bet) =>
+                        isInFilter(bet.updatedAt || bet.createdAt, historyFilter)
+                      ).length ? (
+                        paidHistory
+                          .filter((bet) => isInFilter(bet.updatedAt || bet.createdAt, historyFilter))
+                          .map((bet) => renderBetCard(bet))
+                      ) : (
+                        <div className="emptyState">No settled bets in this filter.</div>
+                      )}
+                    </div>
                   </div>
                 </section>
-              )}
-            </main>
+              </div>
+            )}
           </div>
         )}
       </div>
