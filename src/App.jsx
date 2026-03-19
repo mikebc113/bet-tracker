@@ -2126,7 +2126,7 @@ export default function App() {
           --soft: rgba(255,255,255,0.045);
           --stickyOffset: 0px;
           --topbarHeight: 96px;
-          --homeStickyTop: calc(var(--topbarHeight) + 8px);
+          --homeStickyTop: var(--topbarHeight);
         }
 
         * { box-sizing: border-box; }
@@ -2169,10 +2169,14 @@ export default function App() {
           filter: brightness(0.92);
         }
 
-        .appShell {
-          min-height: 100vh;
-          padding: 18px;
-        }
+       .appShell {
+  min-height: 100vh;
+  padding: 0 12px 12px 12px;
+  background:
+    radial-gradient(circle at top, rgba(70,215,255,0.08), transparent 28%),
+    radial-gradient(circle at bottom, rgba(167,225,95,0.10), transparent 26%),
+    linear-gradient(180deg, #07090d 0%, #0b1018 45%, #05070a 100%);
+}
 
         .pageGrid {
           max-width: 1220px;
@@ -2190,7 +2194,7 @@ export default function App() {
 
         .topbar {
           max-width: 1220px;
-          margin: 0 auto 18px auto;
+          margin: 0 auto 0 auto;
           display: grid;
           grid-template-columns: 1fr auto;
           align-items: start;
@@ -2204,7 +2208,18 @@ export default function App() {
           background: rgba(9,13,20,0.96);
           box-shadow: 0 18px 42px rgba(0,0,0,0.36);
           backdrop-filter: blur(16px);
+          transform: translateZ(0);
         }
+          .topbar::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: -20px;
+  height: 24px;
+  background: rgba(9,13,20,0.96);
+  pointer-events: none;
+}
 
         .logoCenterWrap {
           display: flex;
@@ -2927,21 +2942,25 @@ export default function App() {
         }
 
         .homePage {
-          max-width: 1220px;
-          margin: 0 auto;
-        }
+  max-width: 1220px;
+  margin: 0 auto;
+}
 
-        .homeStickyWrap {
+.homeStickyWrap {
   position: sticky;
   top: var(--homeStickyTop);
   z-index: 90;
+  margin-top: -20px;
   margin-bottom: 14px;
   border-radius: 28px;
   border: 1px solid rgba(255,255,255,0.08);
   box-shadow: 0 18px 40px rgba(0,0,0,0.34);
   overflow: hidden;
   isolation: isolate;
-  background: #0b1018;
+  background:
+    radial-gradient(circle at top left, rgba(70,215,255,0.08), transparent 24%),
+    radial-gradient(circle at bottom center, rgba(167,225,95,0.06), transparent 22%),
+    linear-gradient(180deg, rgba(13,17,24,0.98), rgba(7,10,15,0.99));
 }
 
 .homeStickyWrap::before {
@@ -2949,23 +2968,11 @@ export default function App() {
   position: absolute;
   inset: 0;
   pointer-events: none;
-  z-index: 0;
-  background:
-    radial-gradient(circle at top left, rgba(70,215,255,0.08), transparent 24%),
-    radial-gradient(circle at bottom center, rgba(167,225,95,0.06), transparent 22%),
-    linear-gradient(180deg, rgba(13,17,24,0.98), rgba(7,10,15,0.99));
-}
-
-.homeStickyWrap::after {
-  content: "";
-  position: absolute;
-  inset: 0;
-  pointer-events: none;
-  z-index: 0;
   background:
     radial-gradient(circle at 10% 12%, rgba(70,215,255,0.10), transparent 14%),
     radial-gradient(circle at 90% 86%, rgba(167,225,95,0.10), transparent 18%);
   opacity: 0.5;
+  z-index: 0;
 }
 
 .homeStickyPanel {
@@ -2974,7 +2981,7 @@ export default function App() {
   display: grid;
   gap: 0;
   padding: 16px;
-  background: transparent;
+  background: rgba(8,12,18,0.94);
 }
 
 .homeStickyRow {
@@ -2991,6 +2998,36 @@ export default function App() {
   border-top: 1px solid rgba(255,255,255,0.06);
 }
 
+.homeStickyUserBlock {
+  min-width: 0;
+}
+
+.homeStickyEyebrow {
+  color: var(--muted);
+  font-size: 12px;
+  margin-bottom: 4px;
+}
+
+.homeStickyUser {
+  font-size: 16px;
+  font-weight: 800;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.homeStickyBoardTitle {
+  font-size: 20px;
+  font-weight: 900;
+  margin: 0;
+}
+
+.homeStickyMeta {
+  color: var(--muted);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
 .searchWrap {
   margin-top: 0;
   padding-top: 10px;
@@ -2999,172 +3036,135 @@ export default function App() {
   z-index: 1;
 }
 
-        .homeStickyRow {
-          display: flex;
-          align-items: center;
-          justify-content: space-between;
-          gap: 12px;
-        }
+.homeCard {
+  overflow: hidden;
+}
 
-        .homeStickyUserBlock {
-          min-width: 0;
-        }
+.boardList {
+  display: grid;
+  gap: 10px;
+}
 
-        .homeStickyEyebrow {
-          color: var(--muted);
-          font-size: 12px;
-          margin-bottom: 4px;
-        }
+.boardGameCard {
+  background: rgba(10, 14, 20, 0.92);
+  border: 1px solid rgba(255,255,255,0.08);
+  border-radius: 14px;
+  padding: 8px 10px 10px;
+  box-shadow: inset 0 0 0 1px rgba(255,255,255,0.015);
+  scroll-margin-top: calc(var(--homeStickyTop) + 150px);
+}
 
-        .homeStickyUser {
-          font-size: 16px;
-          font-weight: 800;
-          white-space: nowrap;
-          overflow: hidden;
-          text-overflow: ellipsis;
-        }
+.boardGameCard.searchHit {
+  border-color: rgba(70,215,255,0.42);
+  box-shadow:
+    inset 0 0 0 1px rgba(255,255,255,0.015),
+    0 0 0 1px rgba(70,215,255,0.20),
+    0 0 20px rgba(70,215,255,0.12);
+}
 
-        .homeStickyBoardTitle {
-          font-size: 20px;
-          font-weight: 900;
-          margin: 0;
-        }
+.boardHeaderRow {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 300px;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 6px;
+}
 
-        .homeStickyMeta {
-          color: var(--muted);
-          font-size: 12px;
-          white-space: nowrap;
-        }
+.boardHeaderLeft {
+  font-size: 10px;
+  color: #c7cfda;
+  opacity: 0.9;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
 
-        .homeCard {
-          overflow: hidden;
-        }
+.boardHeaderMarkets {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 6px;
+}
 
-        .boardList {
-          display: grid;
-          gap: 10px;
-        }
+.boardHeaderCell {
+  text-align: center;
+  font-size: 9px;
+  color: #b3bcc7;
+  opacity: 0.85;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+}
 
-        .boardGameCard {
-          background: rgba(10, 14, 20, 0.92);
-          border: 1px solid rgba(255,255,255,0.08);
-          border-radius: 14px;
-          padding: 8px 10px 10px;
-          box-shadow: inset 0 0 0 1px rgba(255,255,255,0.015);
-          scroll-margin-top: calc(var(--homeStickyTop) + 150px);
-        }
+.boardTeamRow {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 300px;
+  gap: 10px;
+  align-items: center;
+  margin-bottom: 6px;
+}
 
-        .boardGameCard.searchHit {
-          border-color: rgba(70,215,255,0.42);
-          box-shadow:
-            inset 0 0 0 1px rgba(255,255,255,0.015),
-            0 0 0 1px rgba(70,215,255,0.20),
-            0 0 20px rgba(70,215,255,0.12);
-        }
+.boardTeamRow:last-of-type {
+  margin-bottom: 0;
+}
 
-        .boardHeaderRow {
-          display: grid;
-          grid-template-columns: minmax(0, 1fr) 300px;
-          align-items: center;
-          gap: 10px;
-          margin-bottom: 6px;
-        }
+.boardTeamInfo {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
 
-        .boardHeaderLeft {
-          font-size: 10px;
-          color: #c7cfda;
-          opacity: 0.9;
-          font-weight: 700;
-          letter-spacing: 0.02em;
-        }
+.boardTeamName {
+  font-size: 12px;
+  font-weight: 800;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
 
-        .boardHeaderMarkets {
-          display: grid;
-          grid-template-columns: repeat(3, minmax(0, 1fr));
-          gap: 6px;
-        }
+.boardMarketGrid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 6px;
+}
 
-        .boardHeaderCell {
-          text-align: center;
-          font-size: 9px;
-          color: #b3bcc7;
-          opacity: 0.85;
-          font-weight: 800;
-          letter-spacing: 0.08em;
-        }
+.boardMarketCell {
+  border: 1px solid rgba(255,255,255,0.08);
+  background: rgba(255,255,255,0.04);
+  color: #edf2f7;
+  border-radius: 8px;
+  min-height: 38px;
+  padding: 5px 4px;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  align-items: center;
+  cursor: pointer;
+  box-shadow: inset 0 0 0 1px rgba(255,255,255,0.015);
+}
 
-        .boardTeamRow {
-          display: grid;
-          grid-template-columns: minmax(0, 1fr) 300px;
-          gap: 10px;
-          align-items: center;
-          margin-bottom: 6px;
-        }
+.boardMarketCell:hover {
+  background: rgba(255,255,255,0.08);
+  border-color: rgba(70,215,255,0.22);
+}
 
-        .boardTeamRow:last-of-type {
-          margin-bottom: 0;
-        }
+.boardMainValue {
+  font-size: 11px;
+  font-weight: 800;
+  line-height: 1;
+}
 
-        .boardTeamInfo {
-          display: flex;
-          align-items: center;
-          gap: 8px;
-          min-width: 0;
-        }
+.boardSubValue {
+  margin-top: 3px;
+  font-size: 9px;
+  color: #9ee3b0;
+  line-height: 1;
+  min-height: 9px;
+}
 
-        .boardTeamName {
-          font-size: 12px;
-          font-weight: 800;
-          white-space: nowrap;
-          overflow: hidden;
-          text-overflow: ellipsis;
-        }
-
-        .boardMarketGrid {
-          display: grid;
-          grid-template-columns: repeat(3, minmax(0, 1fr));
-          gap: 6px;
-        }
-
-        .boardMarketCell {
-          border: 1px solid rgba(255,255,255,0.08);
-          background: rgba(255,255,255,0.04);
-          color: #edf2f7;
-          border-radius: 8px;
-          min-height: 38px;
-          padding: 5px 4px;
-          display: flex;
-          flex-direction: column;
-          justify-content: center;
-          align-items: center;
-          cursor: pointer;
-          box-shadow: inset 0 0 0 1px rgba(255,255,255,0.015);
-        }
-
-        .boardMarketCell:hover {
-          background: rgba(255,255,255,0.08);
-          border-color: rgba(70,215,255,0.22);
-        }
-
-        .boardMainValue {
-          font-size: 11px;
-          font-weight: 800;
-          line-height: 1;
-        }
-
-        .boardSubValue {
-          margin-top: 3px;
-          font-size: 9px;
-          color: #9ee3b0;
-          line-height: 1;
-          min-height: 9px;
-        }
-
-        .boardBottomActions {
-          display: flex;
-          justify-content: center;
-          margin-top: 14px;
-        }
+.boardBottomActions {
+  display: flex;
+  justify-content: center;
+  margin-top: 14px;
+}
 
         @media (max-width: 900px) {
           .logoTitle {
@@ -3185,12 +3185,16 @@ export default function App() {
         }
 
         @media (max-width: 760px) {
-          :root {
-         --stickyOffset: 0px;
+  :root {
+    --stickyOffset: 0px;
+    --topbarHeight: 88px;
+    --homeStickyTop: var(--topbarHeight);
+  }
 
-          .appShell {
-            padding: 12px;
-          }
+  .appShell {
+    padding: 12px;
+  }
+}
 
           .topbar {
             grid-template-columns: 1fr auto;
