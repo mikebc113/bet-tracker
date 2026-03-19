@@ -2,8 +2,8 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { supabase } from "./supabase";
 
 const filters = ["Day", "Month", "Year", "All Time"];
-const TODAY_BOARD_CACHE_KEY = "settleup_today_board_cache_v2";
-const BOARD_PAGE_SIZE = 10;
+const TODAY_BOARD_CACHE_KEY = "settleup_today_board_cache_v3";
+const BOARD_PAGE_SIZE = 50;
 
 function currency(value) {
   const num = Number(value || 0);
@@ -556,6 +556,12 @@ function formatLineNumber(value) {
   return String(Math.abs(num)).replace(/\.0$/, "");
 }
 
+function formatSignedLine(sidePick, sideNumber) {
+  if (!sideNumber && sideNumber !== 0) return "";
+  const sign = sidePick === "minus" ? "-" : "+";
+  return `${sign}${sideNumber}`;
+}
+
 function findMarket(bookmakers, marketKey) {
   if (!Array.isArray(bookmakers)) return null;
 
@@ -761,8 +767,6 @@ export default function App() {
   const [boardSidePick, setBoardSidePick] = useState("ml");
   const [boardSideNumber, setBoardSideNumber] = useState("");
   const [boardClassicOdds, setBoardClassicOdds] = useState("+100");
-  const [boardTakingLogo, setBoardTakingLogo] = useState("");
-  const [boardAgainstLogo, setBoardAgainstLogo] = useState("");
 
   const [betAmount, setBetAmount] = useState("");
   const [winAmount, setWinAmount] = useState("");
@@ -785,10 +789,10 @@ export default function App() {
   const [todayBoard, setTodayBoard] = useState([]);
   const [todayBoardLoading, setTodayBoardLoading] = useState(false);
   const [todayBoardError, setTodayBoardError] = useState("");
-  const [boardHasAnyMissingLogos, setBoardHasAnyMissingLogos] = useState(false);
   const [visibleBoardCount, setVisibleBoardCount] = useState(BOARD_PAGE_SIZE);
+  const [boardSearch, setBoardSearch] = useState("");
 
-  const boardLoadMoreRef = useRef(null);
+  const gameRefs = useRef({});
 
   const authUser = session?.user || null;
 
@@ -827,6 +831,16 @@ export default function App() {
     () => todayBoard.slice(0, visibleBoardCount),
     [todayBoard, visibleBoardCount]
   );
+
+  const boardSearchMatchIndex = useMemo(() => {
+    const query = boardSearch.trim().toLowerCase();
+    if (!query) return -1;
+
+    return todayBoard.findIndex((game) => {
+      const haystack = `${game.awayTeam} ${game.homeTeam}`.toLowerCase();
+      return haystack.includes(query);
+    });
+  }, [boardSearch, todayBoard]);
 
   useEffect(() => {
     async function initAuth() {
@@ -874,16 +888,11 @@ export default function App() {
     if (betMode !== "classic") return;
 
     if (marketType === "total") {
-      if (!classicOdds) setClassicOdds("+100");
+      if (classicOdds !== "+100") setClassicOdds("+100");
       return;
     }
 
-    if (sidePick === "ml") {
-      if (!classicOdds) setClassicOdds("+100");
-      return;
-    }
-
-    if (!classicOdds) {
+    if (sidePick !== "ml" && classicOdds !== "+100") {
       setClassicOdds("+100");
     }
   }, [betMode, marketType, sidePick, classicOdds]);
@@ -904,7 +913,6 @@ export default function App() {
 
     if (!configuredBoardUrl) {
       setTodayBoard([]);
-      setBoardHasAnyMissingLogos(false);
       return;
     }
 
@@ -914,9 +922,6 @@ export default function App() {
     if (cached?.date === todayKey && Array.isArray(cached?.items)) {
       const normalized = normalizeBoardGames(cached.items);
       setTodayBoard(normalized);
-      setBoardHasAnyMissingLogos(
-        normalized.some((game) => !game.homeLogo || !game.awayLogo)
-      );
       setVisibleBoardCount(BOARD_PAGE_SIZE);
       return;
     }
@@ -939,9 +944,6 @@ export default function App() {
         const normalized = normalizeBoardGames(items);
 
         setTodayBoard(normalized);
-        setBoardHasAnyMissingLogos(
-          normalized.some((game) => !game.homeLogo || !game.awayLogo)
-        );
         setVisibleBoardCount(BOARD_PAGE_SIZE);
 
         localStorage.setItem(
@@ -951,7 +953,6 @@ export default function App() {
       } catch {
         setTodayBoardError("Could not load today's board.");
         setTodayBoard([]);
-        setBoardHasAnyMissingLogos(false);
       } finally {
         setTodayBoardLoading(false);
       }
@@ -961,55 +962,25 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    if (!todayBoard.length) return;
+    if (boardSearchMatchIndex === -1) return;
 
-    const node = boardLoadMoreRef.current;
-    if (!node) return;
+    const neededCount =
+      Math.floor(boardSearchMatchIndex / BOARD_PAGE_SIZE) * BOARD_PAGE_SIZE +
+      BOARD_PAGE_SIZE;
 
-    const observer = new IntersectionObserver(
-      (entries) => {
-        const first = entries[0];
-        if (!first?.isIntersecting) return;
-
-        setVisibleBoardCount((prev) =>
-          Math.min(prev + BOARD_PAGE_SIZE, todayBoard.length)
-        );
-      },
-      {
-        root: null,
-        rootMargin: "300px",
-        threshold: 0,
-      }
-    );
-
-    observer.observe(node);
-
-    return () => observer.disconnect();
-  }, [todayBoard.length, visibleBoardCount]);
-
-  useEffect(() => {
-    if (!todayBoard.length) return;
-    if (visibleBoardCount > todayBoard.length) {
-      setVisibleBoardCount(todayBoard.length);
-    }
-  }, [todayBoard, visibleBoardCount]);
-
-  useEffect(() => {
-    async function boot() {
-      if (!authUser) {
-        setUsers([]);
-        setBets([]);
-        setProfilesLoading(false);
-        setBetsLoading(false);
-        return;
-      }
-
-      await ensureCurrentProfile(authUser);
-      await Promise.all([loadProfiles(), loadBets()]);
+    if (visibleBoardCount < neededCount) {
+      setVisibleBoardCount(Math.min(neededCount, todayBoard.length));
+      return;
     }
 
-    boot();
-  }, [authUser]);
+    const targetGame = todayBoard[boardSearchMatchIndex];
+    const node = targetGame ? gameRefs.current[targetGame.id] : null;
+
+    if (node) {
+      node.scrollIntoView({ behavior: "smooth", block: "center" });
+    }
+  }, [boardSearchMatchIndex, visibleBoardCount, todayBoard]);
+
   async function ensureCurrentProfile(user) {
     if (!user) return;
 
@@ -1090,6 +1061,22 @@ export default function App() {
   }
 
   useEffect(() => {
+    async function boot() {
+      if (!authUser) {
+        setUsers([]);
+        setBets([]);
+        setProfilesLoading(false);
+        setBetsLoading(false);
+        return;
+      }
+
+      await ensureCurrentProfile(authUser);
+      await Promise.all([loadProfiles(), loadBets()]);
+    }
+
+    boot();
+  }, [authUser]);
+    useEffect(() => {
     if (!users.length || !bets.length) return;
     cleanupOrphanBets(users, bets);
   }, [users, bets]);
@@ -1296,8 +1283,6 @@ export default function App() {
     setBoardSidePick("ml");
     setBoardSideNumber("");
     setBoardClassicOdds("+100");
-    setBoardTakingLogo("");
-    setBoardAgainstLogo("");
     setBoardBetAmount("");
     setBoardWinAmount("");
   }
@@ -1455,7 +1440,7 @@ export default function App() {
         totalPick: null,
         totalNumber: null,
         sidePick: boardSidePick,
-        sideNumber: boardSidePick === "ml" ? "EVEN" : boardSideNumber.trim(),
+        sideNumber: boardSideNumber.trim(),
         odds: boardSidePick === "ml" ? boardClassicOdds : "+100",
       }),
     };
@@ -1988,8 +1973,6 @@ export default function App() {
 
     setBoardTakingTeam(selection.takingTeam || "");
     setBoardAgainstTeam(selection.againstTeam || "");
-    setBoardTakingLogo(selection.takingLogo || "");
-    setBoardAgainstLogo(selection.againstLogo || "");
     setBoardMarketType(selection.marketType || "side");
 
     if (selection.marketType === "total") {
@@ -2004,11 +1987,7 @@ export default function App() {
     setBoardTotalPick("over");
     setBoardTotalNumber("");
     setBoardSidePick(selection.sidePick || "ml");
-    setBoardSideNumber(
-      selection.sidePick && selection.sidePick !== "ml"
-        ? String(selection.sideNumber || "")
-        : ""
-    );
+    setBoardSideNumber(selection.sideNumber ? String(selection.sideNumber) : "");
     setBoardClassicOdds(
       selection.sidePick === "ml"
         ? formatOddsForDisplay(selection.odds || "") || "+100"
@@ -2145,9 +2124,9 @@ export default function App() {
           --lime: #a7e15f;
           --card: rgba(10, 15, 24, 0.88);
           --soft: rgba(255,255,255,0.045);
-          --stickyOffset: 12px;
+          --stickyOffset: 0px;
           --topbarHeight: 96px;
-          --homeStickyTop: calc(var(--stickyOffset) + var(--topbarHeight) + 8px);
+          --homeStickyTop: calc(var(--topbarHeight) + 8px);
         }
 
         * { box-sizing: border-box; }
@@ -2217,7 +2196,7 @@ export default function App() {
           align-items: start;
           gap: 12px;
           position: sticky;
-          top: var(--stickyOffset);
+          top: 0;
           z-index: 100;
           padding: 12px 14px;
           border-radius: 24px;
@@ -2683,6 +2662,10 @@ export default function App() {
           padding: 11px 12px;
         }
 
+        .searchWrap {
+          margin-top: 8px;
+        }
+
         .scrollList {
           display: grid;
           gap: 14px;
@@ -2837,31 +2820,15 @@ export default function App() {
           min-width: 170px;
         }
 
-        .boardModalGameHeader {
-          display: flex;
-          align-items: center;
-          gap: 14px;
+        .boardSlipMatchup {
           margin-top: 14px;
           padding: 14px;
           border-radius: 18px;
           background: rgba(255,255,255,0.035);
           border: 1px solid rgba(255,255,255,0.08);
-        }
-
-        .boardModalTeams {
-          flex: 1;
-          min-width: 0;
-        }
-
-        .boardModalTeams .main {
           font-size: 16px;
           font-weight: 900;
-        }
-
-        .boardModalTeams .sub {
-          margin-top: 4px;
-          color: var(--muted);
-          font-size: 12px;
+          text-align: center;
         }
 
         .boardLockedInput input {
@@ -2965,24 +2932,72 @@ export default function App() {
         }
 
         .homeStickyWrap {
-          position: sticky;
-          top: var(--homeStickyTop);
-          z-index: 90;
-          background: rgba(7,10,15,0.98);
-          border-radius: 24px;
-          padding: 0;
-          margin-bottom: 14px;
-        }
+  position: sticky;
+  top: var(--homeStickyTop);
+  z-index: 90;
+  margin-bottom: 14px;
+  border-radius: 28px;
+  border: 1px solid rgba(255,255,255,0.08);
+  box-shadow: 0 18px 40px rgba(0,0,0,0.34);
+  overflow: hidden;
+  isolation: isolate;
+  background: #0b1018;
+}
 
-        .homeStickyPanel {
-          display: grid;
-          gap: 10px;
-          padding: 12px;
-          border-radius: 24px;
-          background: rgba(9,13,20,0.98);
-          border: 1px solid rgba(255,255,255,0.08);
-          box-shadow: 0 18px 40px rgba(0,0,0,0.34);
-        }
+.homeStickyWrap::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 0;
+  background:
+    radial-gradient(circle at top left, rgba(70,215,255,0.08), transparent 24%),
+    radial-gradient(circle at bottom center, rgba(167,225,95,0.06), transparent 22%),
+    linear-gradient(180deg, rgba(13,17,24,0.98), rgba(7,10,15,0.99));
+}
+
+.homeStickyWrap::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 0;
+  background:
+    radial-gradient(circle at 10% 12%, rgba(70,215,255,0.10), transparent 14%),
+    radial-gradient(circle at 90% 86%, rgba(167,225,95,0.10), transparent 18%);
+  opacity: 0.5;
+}
+
+.homeStickyPanel {
+  position: relative;
+  z-index: 1;
+  display: grid;
+  gap: 0;
+  padding: 16px;
+  background: transparent;
+}
+
+.homeStickyRow {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 0;
+}
+
+.homeStickyRow + .homeStickyRow {
+  border-top: 1px solid rgba(255,255,255,0.06);
+}
+
+.searchWrap {
+  margin-top: 0;
+  padding-top: 10px;
+  border-top: 1px solid rgba(255,255,255,0.06);
+  position: relative;
+  z-index: 1;
+}
 
         .homeStickyRow {
           display: flex;
@@ -3022,7 +3037,7 @@ export default function App() {
         }
 
         .homeCard {
-          overflow: visible;
+          overflow: hidden;
         }
 
         .boardList {
@@ -3036,6 +3051,15 @@ export default function App() {
           border-radius: 14px;
           padding: 8px 10px 10px;
           box-shadow: inset 0 0 0 1px rgba(255,255,255,0.015);
+          scroll-margin-top: calc(var(--homeStickyTop) + 150px);
+        }
+
+        .boardGameCard.searchHit {
+          border-color: rgba(70,215,255,0.42);
+          box-shadow:
+            inset 0 0 0 1px rgba(255,255,255,0.015),
+            0 0 0 1px rgba(70,215,255,0.20),
+            0 0 20px rgba(70,215,255,0.12);
         }
 
         .boardHeaderRow {
@@ -3136,8 +3160,10 @@ export default function App() {
           min-height: 9px;
         }
 
-        .boardLoadMoreSentinel {
-          height: 4px;
+        .boardBottomActions {
+          display: flex;
+          justify-content: center;
+          margin-top: 14px;
         }
 
         @media (max-width: 900px) {
@@ -3160,9 +3186,7 @@ export default function App() {
 
         @media (max-width: 760px) {
           :root {
-            --stickyOffset: 8px;
-            --topbarHeight: 88px;
-          }
+         --stickyOffset: 0px;
 
           .appShell {
             padding: 12px;
@@ -3256,11 +3280,6 @@ export default function App() {
           .boardBetModal {
             max-width: 100%;
             padding: 14px;
-          }
-
-          .boardModalGameHeader {
-            flex-direction: column;
-            align-items: flex-start;
           }
         }
       `}</style>
@@ -3522,7 +3541,7 @@ export default function App() {
                             className={marketType === "side" ? "radioBtn active" : "radioBtn"}
                             onClick={() => {
                               setMarketType("side");
-                              setClassicOdds("+100");
+                              if (sidePick !== "ml") setClassicOdds("+100");
                             }}
                           >
                             ML / Spread
@@ -3694,25 +3713,8 @@ export default function App() {
                   <h2 className="modalTitle">Propose Bet</h2>
                   <p className="modalCopy">Selected from the today classic bet board.</p>
 
-                  <div className="boardModalGameHeader">
-                    <div className="boardLogoRow">
-                      <TeamLogo src={boardTakingLogo} name={boardTakingTeam} large />
-                      <div className="logoVs">VS</div>
-                      <TeamLogo src={boardAgainstLogo} name={boardAgainstTeam} large />
-                    </div>
-
-                    <div className="boardModalTeams">
-                      <div className="main">
-                        {boardTakingTeam} vs {boardAgainstTeam}
-                      </div>
-                      <div className="sub">
-                        {boardMarketType === "total"
-                          ? `${boardTotalPick === "over" ? "Over" : "Under"} ${boardTotalNumber} • +100`
-                          : boardSidePick === "ml"
-                          ? `Moneyline • ${boardClassicOdds || "+100"}`
-                          : `Spread ${boardSidePick === "plus" ? "+" : "-"}${boardSideNumber} • +100`}
-                      </div>
-                    </div>
+                  <div className="boardSlipMatchup">
+                    {boardTakingTeam} vs {boardAgainstTeam}
                   </div>
 
                   <div className="fieldGroup">
@@ -3770,37 +3772,44 @@ export default function App() {
                       />
                     </div>
 
-                    <div className="fieldGroup">
-                      <label>Pick</label>
-                      <input
-                        value={
-                          boardMarketType === "total"
-                            ? boardTotalPick === "over"
-                              ? "Over"
-                              : "Under"
-                            : boardSidePick === "ml"
-                            ? "ML"
-                            : boardSidePick === "plus"
-                            ? "+"
-                            : "-"
-                        }
-                        disabled
-                      />
-                    </div>
+                    {boardMarketType === "total" ? (
+                      <>
+                        <div className="fieldGroup">
+                          <label>Pick</label>
+                          <input
+                            value={boardTotalPick === "over" ? "Over" : "Under"}
+                            disabled
+                          />
+                        </div>
 
-                    <div className="fieldGroup">
-                      <label>{boardMarketType === "total" ? "Number" : "Line"}</label>
-                      <input
-                        value={
-                          boardMarketType === "total"
-                            ? boardTotalNumber
-                            : boardSidePick === "ml"
-                            ? "EVEN"
-                            : boardSideNumber
-                        }
-                        disabled
-                      />
-                    </div>
+                        <div className="fieldGroup">
+                          <label>Number</label>
+                          <input value={boardTotalNumber} disabled />
+                        </div>
+                      </>
+                    ) : boardSidePick === "ml" ? (
+                      <>
+                        <div className="fieldGroup">
+                          <label>Pick</label>
+                          <input value="ML" disabled />
+                        </div>
+
+                        <div className="fieldGroup">
+                          <label>Line</label>
+                          <input value="EVEN" disabled />
+                        </div>
+                      </>
+                    ) : (
+                      <>
+                        <div className="fieldGroup" style={{ gridColumn: "span 2" }}>
+                          <label>Spread</label>
+                          <input
+                            value={formatSignedLine(boardSidePick, boardSideNumber)}
+                            disabled
+                          />
+                        </div>
+                      </>
+                    )}
                   </div>
 
                   <div className="twoCol">
@@ -3886,6 +3895,14 @@ export default function App() {
                           : `${todayBoard.length} basketball game${todayBoard.length === 1 ? "" : "s"}`}
                       </div>
                     </div>
+
+                    <div className="searchWrap">
+                      <input
+                        value={boardSearch}
+                        onChange={(e) => setBoardSearch(e.target.value)}
+                        placeholder="Search by team name to jump to a game"
+                      />
+                    </div>
                   </div>
                 </div>
 
@@ -3897,171 +3914,187 @@ export default function App() {
                   ) : !todayBoard.length ? (
                     <div className="emptyState">No games available right now.</div>
                   ) : (
-                    <div className="boardList">
-                      {visibleTodayBoard.map((game, idx) => (
-                        <div key={game.id || idx} className="boardGameCard">
-                          <div className="boardHeaderRow">
-                            <div className="boardHeaderLeft">
-                              {game.sportTitle} • {formatBoardTime(game.commenceTime)}
-                            </div>
-
-                            <div className="boardHeaderMarkets">
-                              <div className="boardHeaderCell">ML</div>
-                              <div className="boardHeaderCell">SPR</div>
-                              <div className="boardHeaderCell">TOT</div>
-                            </div>
-                          </div>
-
-                          <div className="boardTeamRow">
-                            <div className="boardTeamInfo">
-                              <TeamLogo src={game.awayLogo} name={game.awayTeam} />
-                              <div className="boardTeamName">{game.awayTeam}</div>
-                            </div>
-
-                            <div className="boardMarketGrid">
-                              <button
-                                className="boardMarketCell"
-                                onClick={() =>
-                                  openBoardBetModal({
-                                    takingTeam: game.awayTeam,
-                                    againstTeam: game.homeTeam,
-                                    takingLogo: game.awayLogo,
-                                    againstLogo: game.homeLogo,
-                                    marketType: "side",
-                                    sidePick: "ml",
-                                    sideNumber: "EVEN",
-                                    odds: game.moneyline?.away || "+100",
-                                  })
-                                }
-                              >
-                                <div className="boardMainValue">{game.moneyline?.away || "—"}</div>
-                                <div className="boardSubValue">Moneyline</div>
-                              </button>
-
-                              <button
-                                className="boardMarketCell"
-                                onClick={() =>
-                                  openBoardBetModal({
-                                    takingTeam: game.awayTeam,
-                                    againstTeam: game.homeTeam,
-                                    takingLogo: game.awayLogo,
-                                    againstLogo: game.homeLogo,
-                                    marketType: "side",
-                                    sidePick: game.spread?.away?.sidePick || "plus",
-                                    sideNumber: game.spread?.away?.sideNumber || "",
-                                    odds: "+100",
-                                  })
-                                }
-                              >
-                                <div className="boardMainValue">
-                                  {game.spread?.away?.sideNumber
-                                    ? `${game.spread.away.sidePick === "plus" ? "+" : "-"}${game.spread.away.sideNumber}`
-                                    : "—"}
+                    <>
+                      <div className="boardList">
+                        {visibleTodayBoard.map((game, idx) => {
+                          const isHit = idx === boardSearchMatchIndex;
+                          return (
+                            <div
+                              key={game.id || idx}
+                              ref={(el) => {
+                                if (el) gameRefs.current[game.id] = el;
+                              }}
+                              className={`boardGameCard ${isHit ? "searchHit" : ""}`}
+                            >
+                              <div className="boardHeaderRow">
+                                <div className="boardHeaderLeft">
+                                  {game.sportTitle} • {formatBoardTime(game.commenceTime)}
                                 </div>
-                                <div className="boardSubValue">+100</div>
-                              </button>
 
-                              <button
-                                className="boardMarketCell"
-                                onClick={() =>
-                                  openBoardBetModal({
-                                    takingTeam: game.awayTeam,
-                                    againstTeam: game.homeTeam,
-                                    takingLogo: game.awayLogo,
-                                    againstLogo: game.homeLogo,
-                                    marketType: "total",
-                                    totalPick: "over",
-                                    totalNumber: game.total?.number || "",
-                                    odds: "+100",
-                                  })
-                                }
-                              >
-                                <div className="boardMainValue">
-                                  {game.total?.number ? `O ${game.total.number}` : "—"}
+                                <div className="boardHeaderMarkets">
+                                  <div className="boardHeaderCell">ML</div>
+                                  <div className="boardHeaderCell">SPR</div>
+                                  <div className="boardHeaderCell">TOT</div>
                                 </div>
-                                <div className="boardSubValue">+100</div>
-                              </button>
-                            </div>
-                          </div>
+                              </div>
 
-                          <div className="boardTeamRow">
-                            <div className="boardTeamInfo">
-                              <TeamLogo src={game.homeLogo} name={game.homeTeam} />
-                              <div className="boardTeamName">{game.homeTeam}</div>
-                            </div>
-
-                            <div className="boardMarketGrid">
-                              <button
-                                className="boardMarketCell"
-                                onClick={() =>
-                                  openBoardBetModal({
-                                    takingTeam: game.homeTeam,
-                                    againstTeam: game.awayTeam,
-                                    takingLogo: game.homeLogo,
-                                    againstLogo: game.awayLogo,
-                                    marketType: "side",
-                                    sidePick: "ml",
-                                    sideNumber: "EVEN",
-                                    odds: game.moneyline?.home || "+100",
-                                  })
-                                }
-                              >
-                                <div className="boardMainValue">{game.moneyline?.home || "—"}</div>
-                                <div className="boardSubValue">Moneyline</div>
-                              </button>
-
-                              <button
-                                className="boardMarketCell"
-                                onClick={() =>
-                                  openBoardBetModal({
-                                    takingTeam: game.homeTeam,
-                                    againstTeam: game.awayTeam,
-                                    takingLogo: game.homeLogo,
-                                    againstLogo: game.awayLogo,
-                                    marketType: "side",
-                                    sidePick: game.spread?.home?.sidePick || "minus",
-                                    sideNumber: game.spread?.home?.sideNumber || "",
-                                    odds: "+100",
-                                  })
-                                }
-                              >
-                                <div className="boardMainValue">
-                                  {game.spread?.home?.sideNumber
-                                    ? `${game.spread.home.sidePick === "plus" ? "+" : "-"}${game.spread.home.sideNumber}`
-                                    : "—"}
+                              <div className="boardTeamRow">
+                                <div className="boardTeamInfo">
+                                  <TeamLogo src={game.awayLogo} name={game.awayTeam} />
+                                  <div className="boardTeamName">{game.awayTeam}</div>
                                 </div>
-                                <div className="boardSubValue">+100</div>
-                              </button>
 
-                              <button
-                                className="boardMarketCell"
-                                onClick={() =>
-                                  openBoardBetModal({
-                                    takingTeam: game.homeTeam,
-                                    againstTeam: game.awayTeam,
-                                    takingLogo: game.homeLogo,
-                                    againstLogo: game.awayLogo,
-                                    marketType: "total",
-                                    totalPick: "under",
-                                    totalNumber: game.total?.number || "",
-                                    odds: "+100",
-                                  })
-                                }
-                              >
-                                <div className="boardMainValue">
-                                  {game.total?.number ? `U ${game.total.number}` : "—"}
+                                <div className="boardMarketGrid">
+                                  <button
+                                    className="boardMarketCell"
+                                    onClick={() =>
+                                      openBoardBetModal({
+                                        takingTeam: game.awayTeam,
+                                        againstTeam: game.homeTeam,
+                                        marketType: "side",
+                                        sidePick: "ml",
+                                        sideNumber: "EVEN",
+                                        odds: game.moneyline?.away || "+100",
+                                      })
+                                    }
+                                  >
+                                    <div className="boardMainValue">{game.moneyline?.away || "—"}</div>
+                                    <div className="boardSubValue">Moneyline</div>
+                                  </button>
+
+                                  <button
+                                    className="boardMarketCell"
+                                    onClick={() =>
+                                      openBoardBetModal({
+                                        takingTeam: game.awayTeam,
+                                        againstTeam: game.homeTeam,
+                                        marketType: "side",
+                                        sidePick: game.spread?.away?.sidePick || "plus",
+                                        sideNumber: game.spread?.away?.sideNumber || "",
+                                        odds: "+100",
+                                      })
+                                    }
+                                  >
+                                    <div className="boardMainValue">
+                                      {game.spread?.away?.sideNumber
+                                        ? formatSignedLine(
+                                            game.spread.away.sidePick,
+                                            game.spread.away.sideNumber
+                                          )
+                                        : "—"}
+                                    </div>
+                                    <div className="boardSubValue">+100</div>
+                                  </button>
+
+                                  <button
+                                    className="boardMarketCell"
+                                    onClick={() =>
+                                      openBoardBetModal({
+                                        takingTeam: game.awayTeam,
+                                        againstTeam: game.homeTeam,
+                                        marketType: "total",
+                                        totalPick: "over",
+                                        totalNumber: game.total?.number || "",
+                                        odds: "+100",
+                                      })
+                                    }
+                                  >
+                                    <div className="boardMainValue">
+                                      {game.total?.number ? `O ${game.total.number}` : "—"}
+                                    </div>
+                                    <div className="boardSubValue">+100</div>
+                                  </button>
                                 </div>
-                                <div className="boardSubValue">+100</div>
-                              </button>
+                              </div>
+
+                              <div className="boardTeamRow">
+                                <div className="boardTeamInfo">
+                                  <TeamLogo src={game.homeLogo} name={game.homeTeam} />
+                                  <div className="boardTeamName">{game.homeTeam}</div>
+                                </div>
+
+                                <div className="boardMarketGrid">
+                                  <button
+                                    className="boardMarketCell"
+                                    onClick={() =>
+                                      openBoardBetModal({
+                                        takingTeam: game.homeTeam,
+                                        againstTeam: game.awayTeam,
+                                        marketType: "side",
+                                        sidePick: "ml",
+                                        sideNumber: "EVEN",
+                                        odds: game.moneyline?.home || "+100",
+                                      })
+                                    }
+                                  >
+                                    <div className="boardMainValue">{game.moneyline?.home || "—"}</div>
+                                    <div className="boardSubValue">Moneyline</div>
+                                  </button>
+
+                                  <button
+                                    className="boardMarketCell"
+                                    onClick={() =>
+                                      openBoardBetModal({
+                                        takingTeam: game.homeTeam,
+                                        againstTeam: game.awayTeam,
+                                        marketType: "side",
+                                        sidePick: game.spread?.home?.sidePick || "minus",
+                                        sideNumber: game.spread?.home?.sideNumber || "",
+                                        odds: "+100",
+                                      })
+                                    }
+                                  >
+                                    <div className="boardMainValue">
+                                      {game.spread?.home?.sideNumber
+                                        ? formatSignedLine(
+                                            game.spread.home.sidePick,
+                                            game.spread.home.sideNumber
+                                          )
+                                        : "—"}
+                                    </div>
+                                    <div className="boardSubValue">+100</div>
+                                  </button>
+
+                                  <button
+                                    className="boardMarketCell"
+                                    onClick={() =>
+                                      openBoardBetModal({
+                                        takingTeam: game.homeTeam,
+                                        againstTeam: game.awayTeam,
+                                        marketType: "total",
+                                        totalPick: "under",
+                                        totalNumber: game.total?.number || "",
+                                        odds: "+100",
+                                      })
+                                    }
+                                  >
+                                    <div className="boardMainValue">
+                                      {game.total?.number ? `U ${game.total.number}` : "—"}
+                                    </div>
+                                    <div className="boardSubValue">+100</div>
+                                  </button>
+                                </div>
+                              </div>
                             </div>
-                          </div>
-                        </div>
-                      ))}
+                          );
+                        })}
+                      </div>
 
                       {visibleBoardCount < todayBoard.length && (
-                        <div ref={boardLoadMoreRef} className="boardLoadMoreSentinel" />
+                        <div className="boardBottomActions">
+                          <button
+                            className="ghostBtn"
+                            onClick={() =>
+                              setVisibleBoardCount((prev) =>
+                                Math.min(prev + BOARD_PAGE_SIZE, todayBoard.length)
+                              )
+                            }
+                          >
+                            Show 50 More
+                          </button>
+                        </div>
                       )}
-                    </div>
+                    </>
                   )}
                 </section>
 
@@ -4371,4 +4404,4 @@ export default function App() {
       </div>
     </>
   );
-}
+}    
