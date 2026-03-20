@@ -1150,7 +1150,7 @@ function normalizeBoardGames(items) {
     }
   });
 
-    const now = Date.now();
+  const now = Date.now();
 
   return Array.from(grouped.values())
     .filter((game) => {
@@ -1302,7 +1302,9 @@ export default function App() {
 
     const match =
       users.find((u) => u.id === authUser.id) ||
-      users.find((u) => u.email?.toLowerCase() === (authUser.email || "").toLowerCase());
+      users.find(
+        (u) => u.email?.toLowerCase() === (authUser.email || "").toLowerCase()
+      );
 
     return (
       match || {
@@ -1318,15 +1320,14 @@ export default function App() {
     );
   }, [authUser, users]);
 
-  const validUserIds = useMemo(() => new Set(users.map((u) => u.id)), [users]);
-
-  const validBets = useMemo(
-    () =>
-      bets.filter(
-        (b) => validUserIds.has(b.proposerId) && validUserIds.has(b.acceptorId)
-      ),
-    [bets, validUserIds]
-  );
+  const myBets = useMemo(() => {
+    if (!currentUser) return [];
+    return bets.filter(
+      (b) =>
+        b &&
+        (b.proposerId === currentUser.id || b.acceptorId === currentUser.id)
+    );
+  }, [bets, currentUser]);
 
   const visibleTodayBoard = useMemo(
     () => todayBoard.slice(0, visibleBoardCount),
@@ -1365,78 +1366,71 @@ export default function App() {
   }, [otherUsers, boardOpponentSearch]);
 
   const openBetsFeed = useMemo(
-    () => validBets.filter((b) => b.status === "accepted"),
-    [validBets]
+    () => myBets.filter((b) => b.status === "accepted"),
+    [myBets]
   );
 
   const leaderboard = useMemo(
-    () => getLeaderboard(users, validBets, leaderboardFilter),
-    [users, validBets, leaderboardFilter]
+    () => getLeaderboard(users, bets, leaderboardFilter),
+    [users, bets, leaderboardFilter]
   );
 
   const myProposedBets = useMemo(
     () =>
-      validBets.filter(
+      myBets.filter(
         (b) => currentUser && b.proposerId === currentUser.id && b.status === "proposed"
       ),
-    [validBets, currentUser]
+    [myBets, currentUser]
   );
 
   const proposedToMe = useMemo(
     () =>
-      validBets.filter(
+      myBets.filter(
         (b) => currentUser && b.acceptorId === currentUser.id && b.status === "proposed"
       ),
-    [validBets, currentUser]
+    [myBets, currentUser]
   );
 
   const pendingBets = useMemo(
     () =>
-      validBets.filter(
-        (b) =>
-          currentUser &&
-          (b.proposerId === currentUser.id || b.acceptorId === currentUser.id) &&
-          b.status === "accepted"
-      ),
-    [validBets, currentUser]
+      myBets.filter((b) => currentUser && b.status === "accepted"),
+    [myBets, currentUser]
   );
 
   const unpaidGradedBets = useMemo(
     () =>
-      validBets.filter(
+      myBets.filter(
         (b) =>
           currentUser &&
-          (b.proposerId === currentUser.id || b.acceptorId === currentUser.id) &&
           b.status === "graded" &&
           !isChopBet(b)
       ),
-    [validBets, currentUser]
+    [myBets, currentUser]
   );
 
   const paidHistory = useMemo(
     () =>
-      validBets.filter(
+      myBets.filter(
         (b) =>
           currentUser &&
-          (b.proposerId === currentUser.id || b.acceptorId === currentUser.id) &&
           (b.status === "settled" ||
             (b.status === "graded" && isChopBet(b)))
       ),
-    [validBets, currentUser]
+    [myBets, currentUser]
   );
 
   const outstanding = useMemo(
     () =>
-      currentUser ? getOutstandingBalances(currentUser.id, users, validBets) : [],
-    [currentUser, users, validBets]
+      currentUser ? getOutstandingBalances(currentUser.id, users, bets) : [],
+    [currentUser, users, bets]
   );
 
   const headToHead = useMemo(
     () =>
       currentUser
-        ? getHeadToHeadTotals(currentUser.id, users, validBets, historyFilter)
+        ? getHeadToHeadTotals(currentUser.id, users, bets, historyFilter)
         : [],
-    [currentUser, users, validBets, historyFilter]
+    [currentUser, users, bets, historyFilter]
   );
 
   useEffect(() => {
@@ -1603,7 +1597,6 @@ export default function App() {
       node.scrollIntoView({ behavior: "smooth", block: "center" });
     }
   }, [boardSearchMatchIndex, visibleBoardCount, todayBoard]);
-
   async function ensureCurrentProfile(user) {
     if (!user) return;
 
@@ -1665,7 +1658,16 @@ export default function App() {
       .order("created_at", { ascending: false });
 
     if (!error && data) {
-      setBets(data.map(mapDbBetToUi));
+      const mappedBets = data
+        .map(mapDbBetToUi)
+        .filter(
+          (bet) =>
+            bet &&
+            authUser &&
+            (bet.proposerId === authUser.id || bet.acceptorId === authUser.id)
+        );
+
+      setBets(mappedBets);
     }
 
     setBetsLoading(false);
@@ -1680,7 +1682,7 @@ export default function App() {
     if (!orphanIds.length) return;
 
     await supabase.from("bets").delete().in("id", orphanIds);
-    setBets((prev) => prev.filter((b) => !orphanIds.includes(b.id)));
+    setBets((prev) => prev.filter((b) => !(!b || b.id === orphanIds)));
   }
 
   useEffect(() => {
@@ -1968,16 +1970,11 @@ export default function App() {
   }
 
   function getBoardCreateBetPayload() {
-    if (!boardTakingTeam.trim() || !boardAgainstTeam.trim()) {
-      return { error: "Enter both teams." };
-    }
-
-    const oddsValue = oddsToNumber(boardClassicOdds);
-    if (!Number.isFinite(oddsValue) || Math.abs(oddsValue) > 10000) {
-      return { error: "Enter valid odds between -10000 and +10000." };
-    }
-
     if (boardMarketType === "total") {
+      if (!boardTakingTeam.trim() || !boardAgainstTeam.trim()) {
+        return { error: "Enter both teams." };
+      }
+
       if (!boardTotalNumber.trim()) return { error: "Enter the total number." };
 
       return {
@@ -1992,6 +1989,15 @@ export default function App() {
           odds: "+100",
         }),
       };
+    }
+
+    if (!boardTakingTeam.trim() || !boardAgainstTeam.trim()) {
+      return { error: "Enter both teams." };
+    }
+
+    const oddsValue = oddsToNumber(boardClassicOdds);
+    if (!Number.isFinite(oddsValue) || Math.abs(oddsValue) > 10000) {
+      return { error: "Enter valid odds between -10000 and +10000." };
     }
 
     if (boardSidePick !== "ml" && !boardSideNumber.trim()) {
@@ -2092,6 +2098,7 @@ export default function App() {
       return;
     }
 
+    const timestamp = getNow();
     const newBet = {
       id: crypto.randomUUID(),
       proposerId: currentUser.id,
@@ -2105,8 +2112,8 @@ export default function App() {
       acceptorGrade: null,
       proposerPaid: false,
       acceptorPaid: false,
-      createdAt: getNow(),
-      updatedAt: getNow(),
+      createdAt: timestamp,
+      updatedAt: timestamp,
     };
 
     const error = await persistNewBet(newBet);
@@ -2120,6 +2127,7 @@ export default function App() {
     setShowCreateBetModal(false);
     resetCreateBetModal();
 
+    setPage("mybets");
     setPageLoading(true);
     setTimeout(() => setPageLoading(false), 250);
   }
@@ -2168,6 +2176,7 @@ export default function App() {
       return;
     }
 
+    const timestamp = getNow();
     const newBet = {
       id: crypto.randomUUID(),
       proposerId: currentUser.id,
@@ -2181,8 +2190,8 @@ export default function App() {
       acceptorGrade: null,
       proposerPaid: false,
       acceptorPaid: false,
-      createdAt: getNow(),
-      updatedAt: getNow(),
+      createdAt: timestamp,
+      updatedAt: timestamp,
     };
 
     const error = await persistNewBet(newBet);
@@ -2196,6 +2205,7 @@ export default function App() {
     setShowBoardBetModal(false);
     resetBoardBetModal();
 
+    setPage("mybets");
     setPageLoading(true);
     setTimeout(() => setPageLoading(false), 250);
   }
@@ -2549,7 +2559,7 @@ export default function App() {
   async function settleAllWithUser(otherUserId) {
     if (!currentUser) return;
 
-    const rows = validBets.filter(
+    const rows = bets.filter(
       (b) =>
         b.status === "graded" &&
         !isChopBet(b) &&
@@ -3604,27 +3614,6 @@ export default function App() {
           letter-spacing: 0.08em;
         }
 
-        .boardSlipPicked {
-          margin-top: 10px;
-          padding-top: 10px;
-          border-top: 1px solid rgba(255,255,255,0.08);
-          display: grid;
-          gap: 6px;
-          text-align: center;
-        }
-
-        .boardSlipPickedLabel {
-          color: var(--muted);
-          font-size: 11px;
-          font-weight: 800;
-          letter-spacing: 0.08em;
-        }
-
-        .boardSlipPickedValue {
-          font-size: 15px;
-          font-weight: 900;
-        }
-
         .boardSlipDetailGrid {
           display: grid;
           grid-template-columns: 1fr 1fr;
@@ -3861,7 +3850,6 @@ export default function App() {
             0 0 0 1px rgba(70,215,255,0.20),
             0 0 20px rgba(70,215,255,0.12);
         }
-
         .boardHeaderRow {
           display: grid;
           grid-template-columns: minmax(0, 1fr) 300px;
@@ -4413,12 +4401,14 @@ export default function App() {
                   </div>
 
                   <div className="sectionBlock">
-                    <h3>Pending</h3>
+                    <h3>My Proposals</h3>
                     <div className="scrollList">
-                      {pendingBets.length === 0 && (
-                        <div className="emptyState">No open bets.</div>
+                      {myProposedBets.length === 0 && (
+                        <div className="emptyState">No outgoing bets.</div>
                       )}
-                      {pendingBets.map((bet) => renderBetCard(bet, { showGrade: true }))}
+                      {myProposedBets.map((bet) =>
+                        renderBetCard(bet, { showDelete: true })
+                      )}
                     </div>
                   </div>
 
@@ -4435,14 +4425,12 @@ export default function App() {
                   </div>
 
                   <div className="sectionBlock">
-                    <h3>My Proposals</h3>
+                    <h3>Accepted and Live</h3>
                     <div className="scrollList">
-                      {myProposedBets.length === 0 && (
-                        <div className="emptyState">No outgoing bets.</div>
+                      {pendingBets.length === 0 && (
+                        <div className="emptyState">No open bets.</div>
                       )}
-                      {myProposedBets.map((bet) =>
-                        renderBetCard(bet, { showDelete: true })
-                      )}
+                      {pendingBets.map((bet) => renderBetCard(bet, { showGrade: true }))}
                     </div>
                   </div>
                 </section>
@@ -4904,7 +4892,8 @@ export default function App() {
             </div>
           </div>
         )}
-                {showBoardBetModal && (
+
+        {showBoardBetModal && (
           <div className="modalBackdrop">
             <div className="modal boardBetModal">
               <button
@@ -4928,21 +4917,23 @@ export default function App() {
                   <span>{boardAgainstTeam}</span>
                 </div>
 
-                <div className="boardSlipDetailGrid">
-                  <div className="boardSlipDetailCard">
-                    <div className="boardSlipDetailCardLabel">Taking</div>
-                    <div className="boardSlipDetailCardValue">
-                      {boardTakingTeam}
+                {boardMarketType !== "total" && (
+                  <div className="boardSlipDetailGrid">
+                    <div className="boardSlipDetailCard">
+                      <div className="boardSlipDetailCardLabel">Taking</div>
+                      <div className="boardSlipDetailCardValue">
+                        {boardTakingTeam}
+                      </div>
                     </div>
-                  </div>
 
-                  <div className="boardSlipDetailCard">
-                    <div className="boardSlipDetailCardLabel">Against</div>
-                    <div className="boardSlipDetailCardValue">
-                      {boardAgainstTeam}
+                    <div className="boardSlipDetailCard">
+                      <div className="boardSlipDetailCardLabel">Against</div>
+                      <div className="boardSlipDetailCardValue">
+                        {boardAgainstTeam}
+                      </div>
                     </div>
                   </div>
-                </div>
+                )}
               </div>
 
               <div className="fieldGroup">
@@ -4977,7 +4968,7 @@ export default function App() {
               {boardMarketType === "side" && boardSidePick === "ml" && (
                 <div className="boardSlipDetailGrid">
                   <div className="boardSlipDetailCard">
-                    <div className="boardSlipDetailCardLabel">Odds</div>
+                    <div className="boardSlipDetailCardLabel">Odds Type</div>
                     <div className="boardSlipDetailCardValue">ML</div>
                   </div>
 
@@ -5156,4 +5147,4 @@ export default function App() {
       </div>
     </>
   );
-}
+}              
