@@ -2,7 +2,8 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { supabase } from "./supabase";
 
 const filters = ["Day", "Month", "Year", "All Time"];
-const TODAY_BOARD_CACHE_KEY = "settleup_today_board_cache_v3";
+const TODAY_BOARD_CACHE_KEY = "settleup_today_board_cache_v6";
+const PAGE_STORAGE_KEY = "settleup_active_page_v1";
 const BOARD_PAGE_SIZE = 50;
 
 function currency(value) {
@@ -52,11 +53,18 @@ function getUserName(users, userId) {
   return users.find((u) => u.id === userId)?.username || "Unknown";
 }
 
+function isChopBet(bet) {
+  return bet?.proposerGrade === "chop" && bet?.acceptorGrade === "chop";
+}
+
 function getBetDisplayStatus(bet) {
   if (bet.status === "proposed") return "Waiting";
   if (bet.status === "declined") return "Declined";
   if (bet.status === "accepted") return "Open";
-  if (bet.status === "graded") return "Awaiting payment";
+  if (bet.status === "graded") {
+    if (isChopBet(bet)) return "Chop";
+    return "Awaiting payment";
+  }
   if (bet.status === "settled") return "Settled";
   return bet.status;
 }
@@ -105,7 +113,12 @@ function calculateWinAmount(stake, odds) {
   const bet = Number(stake);
   const line = oddsToNumber(odds);
 
-  if (!Number.isFinite(bet) || bet <= 0 || !Number.isFinite(line) || line === 0) {
+  if (
+    !Number.isFinite(bet) ||
+    bet <= 0 ||
+    !Number.isFinite(line) ||
+    line === 0
+  ) {
     return "";
   }
 
@@ -128,6 +141,22 @@ function getTodayKey() {
   const mm = `${now.getMonth() + 1}`.padStart(2, "0");
   const dd = `${now.getDate()}`.padStart(2, "0");
   return `${yyyy}-${mm}-${dd}`;
+}
+
+function readTodayBoardCache() {
+  const cached = safeJsonParse(localStorage.getItem(TODAY_BOARD_CACHE_KEY));
+  if (!cached || !Array.isArray(cached.items) || !cached.date) return null;
+  return cached;
+}
+
+function writeTodayBoardCache(date, items) {
+  localStorage.setItem(
+    TODAY_BOARD_CACHE_KEY,
+    JSON.stringify({
+      date,
+      items,
+    })
+  );
 }
 
 function buildCustomPayload(details) {
@@ -258,10 +287,24 @@ function getBetSublineForViewer(bet, currentUserId, users) {
     detail = "Classic • Total";
   }
   if (payload.kind === "classic" && payload.marketType === "side") {
-    detail = payload.sidePick === "ml" ? "Classic • Moneyline" : "Classic • Spread";
+    detail =
+      payload.sidePick === "ml" ? "Classic • Moneyline" : "Classic • Spread";
   }
 
   return `${proposerName} vs ${acceptorName} • ${detail}`;
+}
+
+function isValidFinalPair(mine, theirs) {
+  return (
+    (mine === "win" && theirs === "loss") ||
+    (mine === "loss" && theirs === "win") ||
+    (mine === "chop" && theirs === "chop")
+  );
+}
+
+function isConflictPair(mine, theirs) {
+  if (!mine || !theirs) return false;
+  return !isValidFinalPair(mine, theirs);
 }
 
 function gradeLabelForViewer(bet, currentUserId) {
@@ -270,10 +313,21 @@ function gradeLabelForViewer(bet, currentUserId) {
   const theirs =
     bet.proposerId === currentUserId ? bet.acceptorGrade : bet.proposerGrade;
 
-  if (!mine) return "Pick Win or Loss";
-  if (!theirs) return `You picked ${mine}. Waiting for grade`;
-  if (mine === theirs) return `Disputed • You: ${mine} • Other: ${theirs}`;
-  return `You: ${mine} • Other: ${theirs}`;
+  if (!mine) return "Choose Win, Loss, or Chop";
+
+  if (!theirs) {
+    return `WAITING FOR OPPONENT GRADE • YOU PICKED ${String(mine).toUpperCase()}`;
+  }
+
+  if (mine === "chop" && theirs === "chop") {
+    return "BOTH PLAYERS SELECTED CHOP";
+  }
+
+  if (isConflictPair(mine, theirs)) {
+    return `GRADE CONFLICT • YOU: ${String(mine).toUpperCase()} • OPPONENT: ${String(theirs).toUpperCase()}`;
+  }
+
+  return `YOU: ${String(mine).toUpperCase()} • OPPONENT: ${String(theirs).toUpperCase()}`;
 }
 
 function getLeaderboard(users, bets, filter) {
@@ -281,6 +335,7 @@ function getLeaderboard(users, bets, filter) {
     const relevant = bets.filter(
       (b) =>
         (b.status === "graded" || b.status === "settled") &&
+        !isChopBet(b) &&
         isInFilter(b.updatedAt || b.createdAt, filter) &&
         (b.proposerId === user.id || b.acceptorId === user.id)
     );
@@ -314,6 +369,7 @@ function getHeadToHeadTotals(currentUserId, users, bets, filter) {
   bets.forEach((bet) => {
     if (
       (bet.status !== "graded" && bet.status !== "settled") ||
+      isChopBet(bet) ||
       !isInFilter(bet.updatedAt || bet.createdAt, filter)
     ) {
       return;
@@ -328,7 +384,11 @@ function getHeadToHeadTotals(currentUserId, users, bets, filter) {
     const otherName = getUserName(users, otherUserId);
 
     if (!map.has(otherUserId)) {
-      map.set(otherUserId, { userId: otherUserId, username: otherName, net: 0 });
+      map.set(otherUserId, {
+        userId: otherUserId,
+        username: otherName,
+        net: 0,
+      });
     }
 
     const item = map.get(otherUserId);
@@ -354,6 +414,7 @@ function getOutstandingBalances(currentUserId, users, bets) {
 
   bets.forEach((bet) => {
     if (bet.status !== "graded") return;
+    if (isChopBet(bet)) return;
     if (bet.proposerId !== currentUserId && bet.acceptorId !== currentUserId) {
       return;
     }
@@ -363,7 +424,11 @@ function getOutstandingBalances(currentUserId, users, bets) {
     const otherName = getUserName(users, otherUserId);
 
     if (!map.has(otherUserId)) {
-      map.set(otherUserId, { userId: otherUserId, username: otherName, net: 0 });
+      map.set(otherUserId, {
+        userId: otherUserId,
+        username: otherName,
+        net: 0,
+      });
     }
 
     const item = map.get(otherUserId);
@@ -492,7 +557,9 @@ function TeamLogo({ src, name, large = false }) {
 
 function SettleUpLogo({ centered = false, small = false }) {
   return (
-    <div className={`logoWrap ${centered ? "centered" : ""} ${small ? "small" : ""}`}>
+    <div
+      className={`logoWrap ${centered ? "centered" : ""} ${small ? "small" : ""}`}
+    >
       <div className="logoIcon">
         <svg viewBox="0 0 120 120" aria-hidden="true">
           <defs>
@@ -507,9 +574,29 @@ function SettleUpLogo({ centered = false, small = false }) {
             </linearGradient>
           </defs>
 
-          <circle cx="60" cy="60" r="44" fill="none" stroke="url(#suBlueGreen)" strokeWidth="8" opacity="0.95" />
-          <path d="M25 40c8-14 23-24 40-24" stroke="#46D7FF" strokeWidth="8" strokeLinecap="round" fill="none" />
-          <path d="M93 76c-7 16-22 28-42 28" stroke="#A7E15F" strokeWidth="8" strokeLinecap="round" fill="none" />
+          <circle
+            cx="60"
+            cy="60"
+            r="44"
+            fill="none"
+            stroke="url(#suBlueGreen)"
+            strokeWidth="8"
+            opacity="0.95"
+          />
+          <path
+            d="M25 40c8-14 23-24 40-24"
+            stroke="#46D7FF"
+            strokeWidth="8"
+            strokeLinecap="round"
+            fill="none"
+          />
+          <path
+            d="M93 76c-7 16-22 28-42 28"
+            stroke="#A7E15F"
+            strokeWidth="8"
+            strokeLinecap="round"
+            fill="none"
+          />
           <path d="M68 13l10 5-11 8" fill="#46D7FF" />
           <path d="M54 109l-10-5 11-8" fill="#A7E15F" />
 
@@ -521,9 +608,24 @@ function SettleUpLogo({ centered = false, small = false }) {
           <rect x="56" y="49" width="28" height="8" fill="url(#suCoin)" />
           <ellipse cx="70" cy="57" rx="14" ry="6" fill="url(#suCoin)" />
 
-          <path d="M78 77l8 8 18-24" fill="none" stroke="#A7E15F" strokeWidth="8" strokeLinecap="round" strokeLinejoin="round" />
+          <path
+            d="M78 77l8 8 18-24"
+            fill="none"
+            stroke="#A7E15F"
+            strokeWidth="8"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          />
 
-          <rect x="80" y="34" width="18" height="24" rx="3" fill="#F7FBFF" opacity="0.95" />
+          <rect
+            x="80"
+            y="34"
+            width="18"
+            height="24"
+            rx="3"
+            fill="#F7FBFF"
+            opacity="0.95"
+          />
           <line x1="84" y1="40" x2="94" y2="40" stroke="#37C78A" strokeWidth="2.4" />
           <line x1="84" y1="45" x2="95" y2="45" stroke="#9DB7C7" strokeWidth="2" />
           <line x1="84" y1="50" x2="91" y2="50" stroke="#9DB7C7" strokeWidth="2" />
@@ -581,19 +683,210 @@ function isBasketballItem(item) {
     item?.sportTitle,
     item?.league,
     item?.sport,
+    item?.leagues?.[0]?.name,
+    item?.leagues?.[0]?.abbreviation,
+    item?.season?.type?.name,
+    item?.shortName,
+    item?.name,
   ]
     .filter(Boolean)
     .join(" ")
     .toLowerCase();
 
-  return joined.includes("basketball");
+  return (
+    joined.includes("basketball") ||
+    joined.includes("ncaab") ||
+    joined.includes("ncaa") ||
+    joined.includes("mens college basketball") ||
+    joined.includes("women's college basketball")
+  );
+}
+
+function normalizeTeamName(name) {
+  return String(name || "")
+    .toLowerCase()
+    .replace(/&/g, "and")
+    .replace(/[^a-z0-9]+/g, "")
+    .trim();
+}
+
+function extractEspnCompetition(item) {
+  return item?.competitions?.[0] || null;
+}
+
+function extractEspnCompetitor(item, side) {
+  const competition = extractEspnCompetition(item);
+  if (!competition?.competitors) return null;
+
+  return (
+    competition.competitors.find((competitor) => {
+      const homeAway = String(competitor?.homeAway || "").toLowerCase();
+      return homeAway === side;
+    }) || null
+  );
+}
+
+function getTeamLogoFromEspn(item, side) {
+  const competitor = extractEspnCompetitor(item, side);
+  const logo = competitor?.team?.logo || competitor?.team?.logos?.[0]?.href;
+  return logo || "";
+}
+
+function getTeamNameFromEspn(item, side) {
+  const competitor = extractEspnCompetitor(item, side);
+  return (
+    competitor?.team?.displayName ||
+    competitor?.team?.shortDisplayName ||
+    competitor?.team?.name ||
+    ""
+  );
+}
+
+function extractTeamScore(item, side) {
+  const direct = firstDefined(
+    item?.[`${side}_score`],
+    item?.[`${side}Score`],
+    item?.scores?.[side],
+    item?.score?.[side]
+  );
+  if (direct !== "") return String(direct);
+
+  const espnCompetitor = extractEspnCompetitor(item, side);
+  if (
+    espnCompetitor?.score !== undefined &&
+    espnCompetitor?.score !== null &&
+    espnCompetitor?.score !== ""
+  ) {
+    return String(espnCompetitor.score);
+  }
+
+  const targetName =
+    side === "home"
+      ? item.home_team || item.homeTeam || getTeamNameFromEspn(item, "home")
+      : item.away_team || item.awayTeam || getTeamNameFromEspn(item, "away");
+
+  const outcomes = item?.scores?.outcomes || item?.score?.outcomes;
+  if (Array.isArray(outcomes)) {
+    const match = outcomes.find(
+      (outcome) =>
+        normalizeTeamName(outcome?.name) === normalizeTeamName(targetName)
+    );
+    if (
+      match?.score !== undefined &&
+      match?.score !== null &&
+      match?.score !== ""
+    ) {
+      return String(match.score);
+    }
+  }
+
+  return "";
+}
+
+function extractGameStatus(item) {
+  const competition = extractEspnCompetition(item);
+  const statusType = competition?.status?.type || item?.status?.type || null;
+
+  const completedRaw = firstDefined(
+    statusType?.completed,
+    item?.completed,
+    item?.is_completed,
+    item?.final,
+    item?.isFinal,
+    item?.status === "completed",
+    item?.status === "final"
+  );
+
+  const completed = Boolean(completedRaw);
+  const stateName = String(statusType?.name || "").toLowerCase();
+
+  if (completed || stateName === "status_final" || stateName === "final") {
+    return {
+      isLive: false,
+      isFinal: true,
+      statusText: "Final",
+    };
+  }
+
+  const clock = firstDefined(
+    competition?.status?.type?.shortDetail,
+    competition?.status?.detail,
+    competition?.status?.displayClock,
+    item?.display_clock,
+    item?.displayClock,
+    item?.clock,
+    item?.time_remaining,
+    item?.timeRemaining,
+    item?.status_detail,
+    item?.statusDetail,
+    item?.status_text,
+    item?.statusText,
+    item?.short_detail,
+    item?.shortDetail,
+    item?.game_status,
+    item?.gameStatus
+  );
+
+  if (clock) {
+    const normalized = String(clock).trim();
+    const lower = normalized.toLowerCase();
+
+    if (lower.includes("final") || lower.includes("ft") || lower.includes("ended")) {
+      return {
+        isLive: false,
+        isFinal: true,
+        statusText: "Final",
+      };
+    }
+
+    if (
+      lower.includes("pregame") ||
+      lower.includes("scheduled") ||
+      lower.includes("today") ||
+      lower.includes("tonight")
+    ) {
+      return {
+        isLive: false,
+        isFinal: false,
+        statusText: normalized,
+      };
+    }
+
+    return {
+      isLive: true,
+      isFinal: false,
+      statusText: normalized,
+    };
+  }
+
+  return {
+    isLive: false,
+    isFinal: false,
+    statusText: "",
+  };
 }
 
 function extractMoneyline(item) {
-  const homeTeam = item.home_team || item.homeTeam;
-  const awayTeam = item.away_team || item.awayTeam;
+  const homeTeam =
+    item.home_team || item.homeTeam || getTeamNameFromEspn(item, "home");
+  const awayTeam =
+    item.away_team || item.awayTeam || getTeamNameFromEspn(item, "away");
 
   const h2hMarket = findMarket(item?.bookmakers, "h2h");
+
+  const homeOutcome =
+    h2hMarket?.outcomes?.find(
+      (o) =>
+        o.name === homeTeam ||
+        normalizeTeamName(o.name) === normalizeTeamName(homeTeam)
+    ) || null;
+
+  const awayOutcome =
+    h2hMarket?.outcomes?.find(
+      (o) =>
+        o.name === awayTeam ||
+        normalizeTeamName(o.name) === normalizeTeamName(awayTeam)
+    ) || null;
 
   const homeRaw = firstDefined(
     item?.home_moneyline,
@@ -603,7 +896,7 @@ function extractMoneyline(item) {
     item?.moneyline_home,
     item?.moneylineHome,
     item?.odds?.moneyline?.home,
-    h2hMarket?.outcomes?.find((o) => o.name === homeTeam)?.price
+    homeOutcome?.price
   );
 
   const awayRaw = firstDefined(
@@ -614,7 +907,7 @@ function extractMoneyline(item) {
     item?.moneyline_away,
     item?.moneylineAway,
     item?.odds?.moneyline?.away,
-    h2hMarket?.outcomes?.find((o) => o.name === awayTeam)?.price
+    awayOutcome?.price
   );
 
   return {
@@ -624,10 +917,26 @@ function extractMoneyline(item) {
 }
 
 function extractSpread(item) {
-  const homeTeam = item.home_team || item.homeTeam;
-  const awayTeam = item.away_team || item.awayTeam;
+  const homeTeam =
+    item.home_team || item.homeTeam || getTeamNameFromEspn(item, "home");
+  const awayTeam =
+    item.away_team || item.awayTeam || getTeamNameFromEspn(item, "away");
 
   const spreadMarket = findMarket(item?.bookmakers, "spreads");
+
+  const homeOutcome =
+    spreadMarket?.outcomes?.find(
+      (o) =>
+        o.name === homeTeam ||
+        normalizeTeamName(o.name) === normalizeTeamName(homeTeam)
+    ) || null;
+
+  const awayOutcome =
+    spreadMarket?.outcomes?.find(
+      (o) =>
+        o.name === awayTeam ||
+        normalizeTeamName(o.name) === normalizeTeamName(awayTeam)
+    ) || null;
 
   let homePoint = toNumberOrBlank(
     firstDefined(
@@ -638,7 +947,7 @@ function extractSpread(item) {
       item?.home_spread_points,
       item?.homeSpreadPoints,
       item?.odds?.spread?.home,
-      spreadMarket?.outcomes?.find((o) => o.name === homeTeam)?.point
+      homeOutcome?.point
     )
   );
 
@@ -651,7 +960,7 @@ function extractSpread(item) {
       item?.away_spread_points,
       item?.awaySpreadPoints,
       item?.odds?.spread?.away,
-      spreadMarket?.outcomes?.find((o) => o.name === awayTeam)?.point
+      awayOutcome?.point
     )
   );
 
@@ -675,6 +984,16 @@ function extractSpread(item) {
 function extractTotal(item) {
   const totalMarket = findMarket(item?.bookmakers, "totals");
 
+  const overOutcome =
+    totalMarket?.outcomes?.find(
+      (o) => String(o.name || "").toLowerCase() === "over"
+    ) || null;
+
+  const underOutcome =
+    totalMarket?.outcomes?.find(
+      (o) => String(o.name || "").toLowerCase() === "under"
+    ) || null;
+
   const point = firstDefined(
     item?.total,
     item?.total_points,
@@ -682,7 +1001,8 @@ function extractTotal(item) {
     item?.over_under,
     item?.overUnder,
     item?.odds?.total?.number,
-    totalMarket?.outcomes?.[0]?.point
+    overOutcome?.point,
+    underOutcome?.point
   );
 
   return {
@@ -692,26 +1012,202 @@ function extractTotal(item) {
   };
 }
 
-function normalizeBoardGames(items) {
-  return items
-    .filter((item) => isBasketballItem(item))
-    .map((item, index) => {
-      const homeTeam = item.home_team || item.homeTeam || "Home";
-      const awayTeam = item.away_team || item.awayTeam || "Away";
+function extractBoardItems(data) {
+  if (Array.isArray(data)) return data;
+  if (Array.isArray(data?.items)) return data.items;
+  if (Array.isArray(data?.events)) return data.events;
+  if (Array.isArray(data?.games)) return data.games;
+  if (Array.isArray(data?.data)) return data.data;
+  if (Array.isArray(data?.board)) return data.board;
+  if (Array.isArray(data?.results)) return data.results;
+  if (Array.isArray(data?.combined)) return data.combined;
+  if (Array.isArray(data?.odds)) return data.odds;
 
-      return {
-        id: item.id || `${homeTeam}-${awayTeam}-${index}`,
+  const firstArrayValue = Object.values(data || {}).find((value) =>
+    Array.isArray(value)
+  );
+
+  return Array.isArray(firstArrayValue) ? firstArrayValue : [];
+}
+
+function normalizeBoardGames(items) {
+  const basketballItems = items.filter((item) => isBasketballItem(item));
+  const grouped = new Map();
+
+  basketballItems.forEach((item) => {
+    const homeTeam =
+      item.home_team || item.homeTeam || getTeamNameFromEspn(item, "home") || "Home";
+    const awayTeam =
+      item.away_team || item.awayTeam || getTeamNameFromEspn(item, "away") || "Away";
+    const commenceTime = item.commence_time || item.commenceTime || "";
+    const key = `${homeTeam}__${awayTeam}__${commenceTime}`;
+
+    if (!grouped.has(key)) {
+      grouped.set(key, {
+        id: key,
         homeTeam,
         awayTeam,
-        homeLogo: getTeamLogoFromItem(item, "home"),
-        awayLogo: getTeamLogoFromItem(item, "away"),
+        homeLogo: "",
+        awayLogo: "",
         sportTitle: item.sport_title || item.sportTitle || "Basketball",
-        commenceTime: item.commence_time || item.commenceTime || "",
-        moneyline: extractMoneyline(item),
-        spread: extractSpread(item),
-        total: extractTotal(item),
+        commenceTime,
+        moneyline: { home: "", away: "" },
+        spread: {
+          home: { sidePick: "plus", sideNumber: "", odds: "+100" },
+          away: { sidePick: "plus", sideNumber: "", odds: "+100" },
+        },
+        total: {
+          number: "",
+          overOdds: "+100",
+          underOdds: "+100",
+        },
+        homeScore: "",
+        awayScore: "",
+        isLive: false,
+        isFinal: false,
+        statusText: "",
+      });
+    }
+
+    const game = grouped.get(key);
+    const selectedTeam = item.selectedTeam || "";
+    const marketType = item.marketType;
+    const odds = formatOddsForDisplay(item.odds);
+
+    const awayLogo =
+      getTeamLogoFromItem(item, "away") || getTeamLogoFromEspn(item, "away");
+    const homeLogo =
+      getTeamLogoFromItem(item, "home") || getTeamLogoFromEspn(item, "home");
+
+    if (!game.awayLogo && awayLogo) game.awayLogo = awayLogo;
+    if (!game.homeLogo && homeLogo) game.homeLogo = homeLogo;
+
+    const awayScore = extractTeamScore(item, "away");
+    const homeScore = extractTeamScore(item, "home");
+    if (awayScore !== "") game.awayScore = awayScore;
+    if (homeScore !== "") game.homeScore = homeScore;
+
+    const status = extractGameStatus(item);
+    if (status.statusText || status.isLive || status.isFinal) {
+      game.isLive = status.isLive;
+      game.isFinal = status.isFinal;
+      game.statusText = status.statusText;
+    }
+
+    if (marketType === "side" && item.sidePick === "ml") {
+      if (normalizeTeamName(selectedTeam) === normalizeTeamName(homeTeam)) {
+        game.moneyline.home = odds;
+      }
+      if (normalizeTeamName(selectedTeam) === normalizeTeamName(awayTeam)) {
+        game.moneyline.away = odds;
+      }
+    }
+
+    if (marketType === "side" && item.sidePick !== "ml") {
+      const spreadData = {
+        sidePick: item.sidePick || "plus",
+        sideNumber:
+          item.sideNumber !== null && item.sideNumber !== undefined
+            ? String(Math.abs(Number(item.sideNumber)))
+            : "",
+        odds: "+100",
       };
+
+      if (normalizeTeamName(selectedTeam) === normalizeTeamName(homeTeam)) {
+        game.spread.home = spreadData;
+      }
+
+      if (normalizeTeamName(selectedTeam) === normalizeTeamName(awayTeam)) {
+        game.spread.away = spreadData;
+      }
+    }
+
+    if (marketType === "total") {
+      if (item.totalNumber !== null && item.totalNumber !== undefined) {
+        game.total.number = String(item.totalNumber);
+      }
+    }
+
+    if (!game.moneyline.home || !game.moneyline.away) {
+      const ml = extractMoneyline(item);
+      if (!game.moneyline.home && ml.home) game.moneyline.home = ml.home;
+      if (!game.moneyline.away && ml.away) game.moneyline.away = ml.away;
+    }
+
+    if (!game.spread.home.sideNumber || !game.spread.away.sideNumber) {
+      const spread = extractSpread(item);
+      if (!game.spread.home.sideNumber && spread.home.sideNumber) {
+        game.spread.home = spread.home;
+      }
+      if (!game.spread.away.sideNumber && spread.away.sideNumber) {
+        game.spread.away = spread.away;
+      }
+    }
+
+    if (!game.total.number) {
+      const total = extractTotal(item);
+      if (total.number) game.total = total;
+    }
+  });
+
+    const now = Date.now();
+
+  return Array.from(grouped.values())
+    .filter((game) => {
+      if (!game.commenceTime) return true;
+      const startTime = new Date(game.commenceTime).getTime();
+      if (Number.isNaN(startTime)) return true;
+      return startTime > now;
+    })
+    .sort((a, b) => {
+      return new Date(a.commenceTime).getTime() - new Date(b.commenceTime).getTime();
     });
+}
+
+function findGameForBet(payload, games) {
+  if (!payload || payload.kind !== "classic" || !Array.isArray(games) || !games.length) {
+    return null;
+  }
+
+  const teamA = normalizeTeamName(payload.takingTeam);
+  const teamB = normalizeTeamName(payload.againstTeam);
+
+  return (
+    games.find((game) => {
+      const home = normalizeTeamName(game.homeTeam);
+      const away = normalizeTeamName(game.awayTeam);
+
+      return (
+        (teamA === home && teamB === away) ||
+        (teamA === away && teamB === home)
+      );
+    }) || null
+  );
+}
+
+function getBetGameDisplay(bet, currentUserId, games) {
+  const payload = getPayloadForViewer(bet, currentUserId);
+  const game = findGameForBet(payload, games);
+
+  if (!game) return null;
+
+  const hasScores = game.homeScore !== "" || game.awayScore !== "";
+  const scoreText = hasScores
+    ? `${game.awayTeam} ${game.awayScore || "0"} - ${game.homeTeam} ${game.homeScore || "0"}`
+    : `${game.awayTeam} vs ${game.homeTeam}`;
+
+  let stateText = "";
+  if (game.isFinal) stateText = "Final";
+  else if (game.isLive && game.statusText) stateText = game.statusText;
+  else if (game.statusText) stateText = game.statusText;
+  else stateText = formatBoardTime(game.commenceTime);
+
+  return {
+    scoreText,
+    stateText,
+    isFinal: game.isFinal,
+    isLive: game.isLive,
+  };
 }
 
 export default function App() {
@@ -724,7 +1220,10 @@ export default function App() {
   const [betsLoading, setBetsLoading] = useState(true);
   const [pageLoading, setPageLoading] = useState(false);
 
-  const [page, setPage] = useState("home");
+  const [page, setPage] = useState(() => {
+    if (typeof window === "undefined") return "home";
+    return localStorage.getItem(PAGE_STORAGE_KEY) || "home";
+  });
   const [menuOpen, setMenuOpen] = useState(false);
 
   const [authMode, setAuthMode] = useState("login");
@@ -761,6 +1260,8 @@ export default function App() {
 
   const [boardTakingTeam, setBoardTakingTeam] = useState("");
   const [boardAgainstTeam, setBoardAgainstTeam] = useState("");
+  const [boardTakingLogo, setBoardTakingLogo] = useState("");
+  const [boardAgainstLogo, setBoardAgainstLogo] = useState("");
   const [boardMarketType, setBoardMarketType] = useState("side");
   const [boardTotalPick, setBoardTotalPick] = useState("over");
   const [boardTotalNumber, setBoardTotalNumber] = useState("");
@@ -842,6 +1343,106 @@ export default function App() {
     });
   }, [boardSearch, todayBoard]);
 
+  const otherUsers = useMemo(
+    () => users.filter((u) => u.id !== currentUser?.id),
+    [users, currentUser]
+  );
+
+  const filteredOpponentOptions = useMemo(() => {
+    const query = opponentSearch.trim().toLowerCase();
+    if (!query) return [];
+    return otherUsers.filter((u) =>
+      u.username.toLowerCase().includes(query)
+    );
+  }, [otherUsers, opponentSearch]);
+
+  const filteredBoardOpponentOptions = useMemo(() => {
+    const query = boardOpponentSearch.trim().toLowerCase();
+    if (!query) return [];
+    return otherUsers.filter((u) =>
+      u.username.toLowerCase().includes(query)
+    );
+  }, [otherUsers, boardOpponentSearch]);
+
+  const openBetsFeed = useMemo(
+    () => validBets.filter((b) => b.status === "accepted"),
+    [validBets]
+  );
+
+  const leaderboard = useMemo(
+    () => getLeaderboard(users, validBets, leaderboardFilter),
+    [users, validBets, leaderboardFilter]
+  );
+
+  const myProposedBets = useMemo(
+    () =>
+      validBets.filter(
+        (b) => currentUser && b.proposerId === currentUser.id && b.status === "proposed"
+      ),
+    [validBets, currentUser]
+  );
+
+  const proposedToMe = useMemo(
+    () =>
+      validBets.filter(
+        (b) => currentUser && b.acceptorId === currentUser.id && b.status === "proposed"
+      ),
+    [validBets, currentUser]
+  );
+
+  const pendingBets = useMemo(
+    () =>
+      validBets.filter(
+        (b) =>
+          currentUser &&
+          (b.proposerId === currentUser.id || b.acceptorId === currentUser.id) &&
+          b.status === "accepted"
+      ),
+    [validBets, currentUser]
+  );
+
+  const unpaidGradedBets = useMemo(
+    () =>
+      validBets.filter(
+        (b) =>
+          currentUser &&
+          (b.proposerId === currentUser.id || b.acceptorId === currentUser.id) &&
+          b.status === "graded" &&
+          !isChopBet(b)
+      ),
+    [validBets, currentUser]
+  );
+
+  const paidHistory = useMemo(
+    () =>
+      validBets.filter(
+        (b) =>
+          currentUser &&
+          (b.proposerId === currentUser.id || b.acceptorId === currentUser.id) &&
+          (b.status === "settled" ||
+            (b.status === "graded" && isChopBet(b)))
+      ),
+    [validBets, currentUser]
+  );
+
+  const outstanding = useMemo(
+    () =>
+      currentUser ? getOutstandingBalances(currentUser.id, users, validBets) : [],
+    [currentUser, users, validBets]
+  );
+
+  const headToHead = useMemo(
+    () =>
+      currentUser
+        ? getHeadToHeadTotals(currentUser.id, users, validBets, historyFilter)
+        : [],
+    [currentUser, users, validBets, historyFilter]
+  );
+
+  useEffect(() => {
+    localStorage.setItem(PAGE_STORAGE_KEY, page);
+  }, [page]);
+
   useEffect(() => {
     async function initAuth() {
       const {
@@ -859,6 +1460,7 @@ export default function App() {
     } = supabase.auth.onAuthStateChange((_event, nextSession) => {
       setSession(nextSession || null);
       setMenuOpen(false);
+
       if (!nextSession) {
         setShowCreateBetModal(false);
         setShowBoardBetModal(false);
@@ -909,56 +1511,77 @@ export default function App() {
   }, [boardMarketType, boardSidePick, boardClassicOdds]);
 
   useEffect(() => {
-    const configuredBoardUrl = import.meta.env.VITE_COMBINED_ODDS_ENDPOINT;
-
-    if (!configuredBoardUrl) {
-      setTodayBoard([]);
-      return;
-    }
+    const configuredBoardUrl =
+      import.meta.env.VITE_COMBINED_ODDS_ENDPOINT ||
+      (import.meta.env.DEV
+        ? "http://localhost:4001/api/combined-odds"
+        : "/api/combined-odds");
 
     const todayKey = getTodayKey();
-    const cached = safeJsonParse(localStorage.getItem(TODAY_BOARD_CACHE_KEY));
+    const cached = readTodayBoardCache();
 
-    if (cached?.date === todayKey && Array.isArray(cached?.items)) {
-      const normalized = normalizeBoardGames(cached.items);
-      setTodayBoard(normalized);
+    if (cached?.date === todayKey && Array.isArray(cached.items) && cached.items.length) {
+      setTodayBoard(normalizeBoardGames(cached.items));
       setVisibleBoardCount(BOARD_PAGE_SIZE);
-      return;
     }
 
-    async function loadTodayBoard() {
+    let cancelled = false;
+
+    async function loadTodayBoardOnce() {
       setTodayBoardLoading(true);
       setTodayBoardError("");
 
       try {
-        const response = await fetch(configuredBoardUrl);
-        if (!response.ok) throw new Error("Could not load board");
+        const response = await fetch(configuredBoardUrl, {
+          method: "GET",
+          headers: { Accept: "application/json" },
+          cache: "no-store",
+        });
+
+        if (!response.ok) {
+          throw new Error(`Board request failed: ${response.status}`);
+        }
 
         const data = await response.json();
-        const items = Array.isArray(data)
-          ? data
-          : Array.isArray(data?.items)
-          ? data.items
-          : [];
-
+        const items = extractBoardItems(data);
         const normalized = normalizeBoardGames(items);
 
-        setTodayBoard(normalized);
-        setVisibleBoardCount(BOARD_PAGE_SIZE);
-
-        localStorage.setItem(
-          TODAY_BOARD_CACHE_KEY,
-          JSON.stringify({ date: todayKey, items })
-        );
+        if (!cancelled) {
+          if (normalized.length) {
+            setTodayBoard(normalized);
+            setVisibleBoardCount(BOARD_PAGE_SIZE);
+            writeTodayBoardCache(todayKey, items);
+            setTodayBoardError("");
+          } else if (cached?.items?.length) {
+            setTodayBoard(normalizeBoardGames(cached.items));
+            setTodayBoardError("");
+          } else {
+            setTodayBoard([]);
+            setTodayBoardError("Could not load today's board.");
+          }
+        }
       } catch {
-        setTodayBoardError("Could not load today's board.");
-        setTodayBoard([]);
+        if (!cancelled) {
+          if (cached?.items?.length) {
+            setTodayBoard(normalizeBoardGames(cached.items));
+            setTodayBoardError("");
+          } else {
+            setTodayBoard([]);
+            setTodayBoardError("Could not load today's board.");
+          }
+        }
       } finally {
-        setTodayBoardLoading(false);
+        if (!cancelled) {
+          setTodayBoardLoading(false);
+        }
       }
     }
 
-    loadTodayBoard();
+    loadTodayBoardOnce();
+
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   useEffect(() => {
@@ -1076,7 +1699,8 @@ export default function App() {
 
     boot();
   }, [authUser]);
-    useEffect(() => {
+
+  useEffect(() => {
     if (!users.length || !bets.length) return;
     cleanupOrphanBets(users, bets);
   }, [users, bets]);
@@ -1088,66 +1712,6 @@ export default function App() {
     setAccountLastName(currentUser.lastName || "");
     setAccountEmail(currentUser.email || "");
   }, [currentUser]);
-
-  const otherUsers = users.filter((u) => u.id !== currentUser?.id);
-
-  const filteredOpponentOptions = otherUsers.filter((u) =>
-    u.username.toLowerCase().includes(opponentSearch.toLowerCase())
-  );
-
-  const filteredBoardOpponentOptions = otherUsers.filter((u) =>
-    u.username.toLowerCase().includes(boardOpponentSearch.toLowerCase())
-  );
-
-  const openBetsFeed = validBets.filter((b) => b.status === "accepted");
-
-  const leaderboard = useMemo(
-    () => getLeaderboard(users, validBets, leaderboardFilter),
-    [users, validBets, leaderboardFilter]
-  );
-
-  const myProposedBets = validBets.filter(
-    (b) => currentUser && b.proposerId === currentUser.id && b.status === "proposed"
-  );
-
-  const proposedToMe = validBets.filter(
-    (b) => currentUser && b.acceptorId === currentUser.id && b.status === "proposed"
-  );
-
-  const pendingBets = validBets.filter(
-    (b) =>
-      currentUser &&
-      (b.proposerId === currentUser.id || b.acceptorId === currentUser.id) &&
-      b.status === "accepted"
-  );
-
-  const unpaidGradedBets = validBets.filter(
-    (b) =>
-      currentUser &&
-      (b.proposerId === currentUser.id || b.acceptorId === currentUser.id) &&
-      b.status === "graded"
-  );
-
-  const paidHistory = validBets.filter(
-    (b) =>
-      currentUser &&
-      (b.proposerId === currentUser.id || b.acceptorId === currentUser.id) &&
-      b.status === "settled"
-  );
-
-  const outstanding = useMemo(
-    () =>
-      currentUser ? getOutstandingBalances(currentUser.id, users, validBets) : [],
-    [currentUser, users, validBets]
-  );
-
-  const headToHead = useMemo(
-    () =>
-      currentUser
-        ? getHeadToHeadTotals(currentUser.id, users, validBets, historyFilter)
-        : [],
-    [currentUser, users, validBets, historyFilter]
-  );
 
   async function usernameExists(username, excludeId = null) {
     const clean = username.trim().toLowerCase();
@@ -1277,6 +1841,8 @@ export default function App() {
     setBoardSelectedOpponentId("");
     setBoardTakingTeam("");
     setBoardAgainstTeam("");
+    setBoardTakingLogo("");
+    setBoardAgainstLogo("");
     setBoardMarketType("side");
     setBoardTotalPick("over");
     setBoardTotalNumber("");
@@ -1396,7 +1962,7 @@ export default function App() {
         totalNumber,
         sidePick,
         sideNumber: sidePick === "ml" ? "EVEN" : sideNumber.trim(),
-        odds: classicOdds,
+        odds: sidePick === "ml" ? classicOdds : "+100",
       }),
     };
   }
@@ -1440,7 +2006,7 @@ export default function App() {
         totalPick: null,
         totalNumber: null,
         sidePick: boardSidePick,
-        sideNumber: boardSideNumber.trim(),
+        sideNumber: boardSidePick === "ml" ? "EVEN" : boardSideNumber.trim(),
         odds: boardSidePick === "ml" ? boardClassicOdds : "+100",
       }),
     };
@@ -1465,6 +2031,20 @@ export default function App() {
       },
     ]);
 
+    return error;
+  }
+
+  async function updateBetRow(betId, patch) {
+    const dbPatch = {};
+
+    if ("status" in patch) dbPatch.status = patch.status;
+    if ("proposerGrade" in patch) dbPatch.proposer_grade = patch.proposerGrade;
+    if ("acceptorGrade" in patch) dbPatch.acceptor_grade = patch.acceptorGrade;
+    if ("proposerPaid" in patch) dbPatch.proposer_paid = patch.proposerPaid;
+    if ("acceptorPaid" in patch) dbPatch.acceptor_paid = patch.acceptorPaid;
+    if ("updatedAt" in patch) dbPatch.updated_at = patch.updatedAt;
+
+    const { error } = await supabase.from("bets").update(dbPatch).eq("id", betId);
     return error;
   }
 
@@ -1623,21 +2203,18 @@ export default function App() {
   async function deleteBet(betId) {
     const { error } = await supabase.from("bets").delete().eq("id", betId);
     if (error) return;
-    setBets((prev) => prev.filter((b) => b.id !== betId));
+    setBets((prev) => prev.filter((b) => !(!b || b.id === betId)));
   }
 
   async function acceptBet(betId) {
     const updatedAt = getNow();
 
-    const { error } = await supabase
-      .from("bets")
-      .update({
-        status: "accepted",
-        updated_at: updatedAt,
-        proposer_grade: null,
-        acceptor_grade: null,
-      })
-      .eq("id", betId);
+    const error = await updateBetRow(betId, {
+      status: "accepted",
+      proposerGrade: null,
+      acceptorGrade: null,
+      updatedAt,
+    });
 
     if (error) return;
 
@@ -1665,13 +2242,10 @@ export default function App() {
   async function declineBet(betId) {
     const updatedAt = getNow();
 
-    const { error } = await supabase
-      .from("bets")
-      .update({
-        status: "declined",
-        updated_at: updatedAt,
-      })
-      .eq("id", betId);
+    const error = await updateBetRow(betId, {
+      status: "declined",
+      updatedAt,
+    });
 
     if (error) return;
 
@@ -1688,19 +2262,20 @@ export default function App() {
 
     const warning = gradeWarnings[betId];
     const isProposer = selectedBet.proposerId === currentUser.id;
+    const myExisting = isProposer ? selectedBet.proposerGrade : selectedBet.acceptorGrade;
     const otherGrade = isProposer ? selectedBet.acceptorGrade : selectedBet.proposerGrade;
+
+    const nextProposerGrade = isProposer ? result : selectedBet.proposerGrade;
+    const nextAcceptorGrade = isProposer ? selectedBet.acceptorGrade : result;
 
     if (!otherGrade) {
       const updatedAt = getNow();
-      const { error } = await supabase
-        .from("bets")
-        .update({
-          proposer_grade: isProposer ? result : selectedBet.proposerGrade,
-          acceptor_grade: isProposer ? selectedBet.acceptorGrade : result,
-          status: "accepted",
-          updated_at: updatedAt,
-        })
-        .eq("id", betId);
+      const error = await updateBetRow(betId, {
+        proposerGrade: nextProposerGrade,
+        acceptorGrade: nextAcceptorGrade,
+        status: "accepted",
+        updatedAt,
+      });
 
       if (error) return;
 
@@ -1709,8 +2284,8 @@ export default function App() {
           b.id === betId
             ? {
                 ...b,
-                proposerGrade: isProposer ? result : b.proposerGrade,
-                acceptorGrade: isProposer ? b.acceptorGrade : result,
+                proposerGrade: nextProposerGrade,
+                acceptorGrade: nextAcceptorGrade,
                 status: "accepted",
                 updatedAt,
               }
@@ -1723,27 +2298,25 @@ export default function App() {
         delete copy[betId];
         return copy;
       });
-
       return;
     }
 
-    if (result === otherGrade && (!warning || warning !== result)) {
+    if (isConflictPair(result, otherGrade) && !warning) {
       setGradeWarnings((prev) => ({ ...prev, [betId]: result }));
       return;
     }
 
-    if (warning && result !== otherGrade) {
+    if (warning && result !== warning) {
       const updatedAt = getNow();
+      const resetProposerGrade = isProposer ? result : null;
+      const resetAcceptorGrade = isProposer ? null : result;
 
-      const { error } = await supabase
-        .from("bets")
-        .update({
-          proposer_grade: isProposer ? result : null,
-          acceptor_grade: isProposer ? null : result,
-          status: "accepted",
-          updated_at: updatedAt,
-        })
-        .eq("id", betId);
+      const error = await updateBetRow(betId, {
+        proposerGrade: resetProposerGrade,
+        acceptorGrade: resetAcceptorGrade,
+        status: "accepted",
+        updatedAt,
+      });
 
       if (error) return;
 
@@ -1752,8 +2325,8 @@ export default function App() {
           b.id === betId
             ? {
                 ...b,
-                proposerGrade: isProposer ? result : null,
-                acceptorGrade: isProposer ? null : result,
+                proposerGrade: resetProposerGrade,
+                acceptorGrade: resetAcceptorGrade,
                 status: "accepted",
                 updatedAt,
               }
@@ -1766,24 +2339,54 @@ export default function App() {
         delete copy[betId];
         return copy;
       });
-
       return;
     }
 
-    if (result !== otherGrade) {
+    if (warning && result === warning) {
       const updatedAt = getNow();
-      const nextProposerGrade = isProposer ? result : selectedBet.proposerGrade;
-      const nextAcceptorGrade = isProposer ? selectedBet.acceptorGrade : result;
+      const finalStatus = isValidFinalPair(nextProposerGrade, nextAcceptorGrade)
+        ? "graded"
+        : "accepted";
 
-      const { error } = await supabase
-        .from("bets")
-        .update({
-          proposer_grade: nextProposerGrade,
-          acceptor_grade: nextAcceptorGrade,
-          status: "graded",
-          updated_at: updatedAt,
-        })
-        .eq("id", betId);
+      const error = await updateBetRow(betId, {
+        proposerGrade: nextProposerGrade,
+        acceptorGrade: nextAcceptorGrade,
+        status: finalStatus,
+        updatedAt,
+      });
+
+      if (error) return;
+
+      setBets((prev) =>
+        prev.map((b) =>
+          b.id === betId
+            ? {
+                ...b,
+                proposerGrade: nextProposerGrade,
+                acceptorGrade: nextAcceptorGrade,
+                status: finalStatus,
+                updatedAt,
+              }
+            : b
+        )
+      );
+
+      setGradeWarnings((prev) => {
+        const copy = { ...prev };
+        delete copy[betId];
+        return copy;
+      });
+      return;
+    }
+
+    if (myExisting && otherGrade && isValidFinalPair(nextProposerGrade, nextAcceptorGrade)) {
+      const updatedAt = getNow();
+      const error = await updateBetRow(betId, {
+        proposerGrade: nextProposerGrade,
+        acceptorGrade: nextAcceptorGrade,
+        status: "graded",
+        updatedAt,
+      });
 
       if (error) return;
 
@@ -1809,18 +2412,122 @@ export default function App() {
     }
   }
 
+  async function autoFinalizeCompletedGames() {
+    if (!todayBoard.length) return;
+
+    const candidates = bets.filter((bet) => {
+      if (bet.status !== "accepted") return false;
+      if (!bet.betPayload || bet.betPayload.kind !== "classic") return false;
+
+      const game = findGameForBet(bet.betPayload, todayBoard);
+      return game?.isFinal;
+    });
+
+    for (const bet of candidates) {
+      const game = findGameForBet(bet.betPayload, todayBoard);
+      if (!game) continue;
+
+      const homeScore = Number(game.homeScore);
+      const awayScore = Number(game.awayScore);
+
+      if (!Number.isFinite(homeScore) || !Number.isFinite(awayScore)) continue;
+
+      const payload = bet.betPayload;
+      let proposerResult = null;
+      let acceptorResult = null;
+
+      const proposerTeamNormalized = normalizeTeamName(payload.takingTeam);
+      const homeNormalized = normalizeTeamName(game.homeTeam);
+      const awayNormalized = normalizeTeamName(game.awayTeam);
+
+      const proposerIsHome = proposerTeamNormalized === homeNormalized;
+      const proposerIsAway = proposerTeamNormalized === awayNormalized;
+      if (!proposerIsHome && !proposerIsAway) continue;
+
+      const proposerScore = proposerIsHome ? homeScore : awayScore;
+      const opponentScore = proposerIsHome ? awayScore : homeScore;
+
+      if (payload.marketType === "side") {
+        if (payload.sidePick === "ml") {
+          if (proposerScore === opponentScore) continue;
+          proposerResult = proposerScore > opponentScore ? "win" : "loss";
+        } else {
+          const spreadValue = Number(payload.sideNumber);
+          if (!Number.isFinite(spreadValue)) continue;
+
+          const signedSpread = payload.sidePick === "minus" ? -spreadValue : spreadValue;
+          const adjusted = proposerScore + signedSpread;
+
+          if (adjusted === opponentScore) {
+            proposerResult = "chop";
+          } else {
+            proposerResult = adjusted > opponentScore ? "win" : "loss";
+          }
+        }
+      }
+
+      if (payload.marketType === "total") {
+        const totalLine = Number(payload.totalNumber);
+        if (!Number.isFinite(totalLine)) continue;
+
+        const totalScore = homeScore + awayScore;
+        if (totalScore === totalLine) {
+          proposerResult = "chop";
+        } else if (payload.totalPick === "over") {
+          proposerResult = totalScore > totalLine ? "win" : "loss";
+        } else {
+          proposerResult = totalScore < totalLine ? "win" : "loss";
+        }
+      }
+
+      if (!proposerResult) continue;
+
+      acceptorResult =
+        proposerResult === "win"
+          ? "loss"
+          : proposerResult === "loss"
+          ? "win"
+          : "chop";
+
+      const updatedAt = getNow();
+      const error = await updateBetRow(bet.id, {
+        proposerGrade: proposerResult,
+        acceptorGrade: acceptorResult,
+        status: "graded",
+        updatedAt,
+      });
+
+      if (error) continue;
+
+      setBets((prev) =>
+        prev.map((row) =>
+          row.id === bet.id
+            ? {
+                ...row,
+                proposerGrade: proposerResult,
+                acceptorGrade: acceptorResult,
+                status: "graded",
+                updatedAt,
+              }
+            : row
+        )
+      );
+    }
+  }
+
+  useEffect(() => {
+    autoFinalizeCompletedGames();
+  }, [todayBoard]);
+
   async function settleBet(betId) {
     const updatedAt = getNow();
 
-    const { error } = await supabase
-      .from("bets")
-      .update({
-        proposer_paid: true,
-        acceptor_paid: true,
-        status: "settled",
-        updated_at: updatedAt,
-      })
-      .eq("id", betId);
+    const error = await updateBetRow(betId, {
+      proposerPaid: true,
+      acceptorPaid: true,
+      status: "settled",
+      updatedAt,
+    });
 
     if (error) return;
 
@@ -1845,6 +2552,7 @@ export default function App() {
     const rows = validBets.filter(
       (b) =>
         b.status === "graded" &&
+        !isChopBet(b) &&
         ((b.proposerId === currentUser.id && b.acceptorId === otherUserId) ||
           (b.proposerId === otherUserId && b.acceptorId === currentUser.id))
     );
@@ -1957,8 +2665,8 @@ export default function App() {
 
   function renderGradeWarning(betId) {
     return gradeWarnings[betId] ? (
-      <div className="errorText compactError">
-        The other Player has selected a different outcome, are you sure?
+      <div className="errorText compactError strongMessage">
+        Opponent picked something different. Tap the same result again to confirm, or choose a different result to reset.
       </div>
     ) : null;
   }
@@ -1973,6 +2681,8 @@ export default function App() {
 
     setBoardTakingTeam(selection.takingTeam || "");
     setBoardAgainstTeam(selection.againstTeam || "");
+    setBoardTakingLogo(selection.takingLogo || "");
+    setBoardAgainstLogo(selection.againstLogo || "");
     setBoardMarketType(selection.marketType || "side");
 
     if (selection.marketType === "total") {
@@ -2011,6 +2721,7 @@ export default function App() {
     const paymentText = iAmWinner ? "Got Paid!" : "Paid Up!";
     const headline = getBetHeadlineForViewer(bet, currentUser.id);
     const subline = getBetSublineForViewer(bet, currentUser.id, users);
+    const gameDisplay = getBetGameDisplay(bet, currentUser.id, todayBoard);
 
     return (
       <div key={bet.id} className="betCard">
@@ -2019,6 +2730,15 @@ export default function App() {
           <div className="betLeft">
             <div className="betTitle">{headline}</div>
             <div className="betSub">{subline}</div>
+            {gameDisplay && (
+              <div className="liveGameMeta">
+                <div className="liveGameScore">{gameDisplay.scoreText}</div>
+                <div className={`liveGameState ${gameDisplay.isLive ? "live" : ""}`}>
+                  {gameDisplay.isLive ? "LIVE • " : ""}
+                  {gameDisplay.stateText}
+                </div>
+              </div>
+            )}
           </div>
 
           <div className="betRight">
@@ -2038,6 +2758,9 @@ export default function App() {
                 </button>
                 <button className="ghostBtn miniBtn" onClick={() => gradeBet(bet.id, "loss")}>
                   Loss
+                </button>
+                <button className="ghostBtn miniBtn" onClick={() => gradeBet(bet.id, "chop")}>
+                  Chop
                 </button>
               </div>
             ) : options.showPayment ? (
@@ -2071,7 +2794,9 @@ export default function App() {
 
         {options.showGrade && (
           <>
-            <div className="softText compactMeta">{gradeLabelForViewer(bet, currentUser.id)}</div>
+            <div className="softText compactMeta strongMessage">
+              {gradeLabelForViewer(bet, currentUser.id)}
+            </div>
             {renderGradeWarning(bet.id)}
           </>
         )}
@@ -2107,7 +2832,8 @@ export default function App() {
   }
 
   const showLockedState =
-    authLoading || !session || profilesLoading || betsLoading;
+    authLoading || (session && (profilesLoading || betsLoading));
+
   return (
     <>
       <style>{`
@@ -2169,14 +2895,14 @@ export default function App() {
           filter: brightness(0.92);
         }
 
-       .appShell {
-  min-height: 100vh;
-  padding: 0 12px 12px 12px;
-  background:
-    radial-gradient(circle at top, rgba(70,215,255,0.08), transparent 28%),
-    radial-gradient(circle at bottom, rgba(167,225,95,0.10), transparent 26%),
-    linear-gradient(180deg, #07090d 0%, #0b1018 45%, #05070a 100%);
-}
+        .appShell {
+          min-height: 100vh;
+          padding: 0 12px 12px 12px;
+          background:
+            radial-gradient(circle at top, rgba(70,215,255,0.08), transparent 28%),
+            radial-gradient(circle at bottom, rgba(167,225,95,0.10), transparent 26%),
+            linear-gradient(180deg, #07090d 0%, #0b1018 45%, #05070a 100%);
+        }
 
         .pageGrid {
           max-width: 1220px;
@@ -2210,16 +2936,17 @@ export default function App() {
           backdrop-filter: blur(16px);
           transform: translateZ(0);
         }
-          .topbar::after {
-  content: "";
-  position: absolute;
-  left: 0;
-  right: 0;
-  bottom: -20px;
-  height: 24px;
-  background: rgba(9,13,20,0.96);
-  pointer-events: none;
-}
+
+        .topbar::after {
+          content: "";
+          position: absolute;
+          left: 0;
+          right: 0;
+          bottom: -20px;
+          height: 24px;
+          background: rgba(9,13,20,0.98);
+          pointer-events: none;
+        }
 
         .logoCenterWrap {
           display: flex;
@@ -2402,7 +3129,8 @@ export default function App() {
         .filterBtn,
         .tabBtn,
         .radioBtn,
-        .lineTag {
+        .lineTag,
+        .menuActionBtn {
           border-radius: 18px;
           padding: 10px 16px;
           cursor: pointer;
@@ -2424,7 +3152,8 @@ export default function App() {
         .filterBtn,
         .tabBtn,
         .radioBtn,
-        .lineTag {
+        .lineTag,
+        .menuActionBtn {
           border: 1px solid rgba(255,255,255,0.10);
           background: rgba(255,255,255,0.035);
           color: #edf2f7;
@@ -2434,7 +3163,8 @@ export default function App() {
         .ghostBtn:hover,
         .filterBtn:hover,
         .tabBtn:hover,
-        .radioBtn:hover {
+        .radioBtn:hover,
+        .menuActionBtn:hover {
           background: rgba(255,255,255,0.06);
         }
 
@@ -2524,8 +3254,8 @@ export default function App() {
         }
 
         .boardBetModal {
-          max-width: 470px;
-          max-height: min(82vh, 700px);
+          max-width: 520px;
+          max-height: min(84vh, 760px);
           padding: 16px;
         }
 
@@ -2641,16 +3371,6 @@ export default function App() {
           box-shadow: none;
         }
 
-        .oddsInput span {
-          color: var(--teal);
-        }
-
-        .helperText {
-          margin-top: 6px;
-          color: var(--muted);
-          font-size: 12px;
-        }
-
         .autocompleteBox {
           margin-top: 8px;
           border: 1px solid rgba(255,255,255,0.10);
@@ -2673,12 +3393,12 @@ export default function App() {
           background: rgba(255,255,255,0.06);
         }
 
-        .smallPad {
-          padding: 11px 12px;
-        }
-
         .searchWrap {
-          margin-top: 8px;
+          margin-top: 0;
+          padding-top: 8px;
+          border-top: 1px solid rgba(255,255,255,0.06);
+          position: relative;
+          z-index: 1;
         }
 
         .scrollList {
@@ -2743,6 +3463,29 @@ export default function App() {
           color: var(--muted);
           font-size: 13px;
           margin-top: 7px;
+        }
+
+        .liveGameMeta {
+          margin-top: 10px;
+          display: grid;
+          gap: 4px;
+        }
+
+        .liveGameScore {
+          font-size: 15px;
+          font-weight: 900;
+          color: #f4f7fb;
+        }
+
+        .liveGameState {
+          font-size: 12px;
+          font-weight: 800;
+          color: var(--muted);
+          letter-spacing: 0.03em;
+        }
+
+        .liveGameState.live {
+          color: #9ee3b0;
         }
 
         .betRowBottom {
@@ -2835,19 +3578,85 @@ export default function App() {
           min-width: 170px;
         }
 
-        .boardSlipMatchup {
-          margin-top: 14px;
-          padding: 14px;
+        .boardSlipHeader {
+          margin-top: 10px;
+          padding: 12px;
           border-radius: 18px;
           background: rgba(255,255,255,0.035);
           border: 1px solid rgba(255,255,255,0.08);
+        }
+
+        .boardSlipTeams {
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          gap: 10px;
+          text-align: center;
           font-size: 16px;
           font-weight: 900;
+          flex-wrap: wrap;
+        }
+
+        .boardSlipVs {
+          color: var(--muted);
+          font-size: 12px;
+          font-weight: 800;
+          letter-spacing: 0.08em;
+        }
+
+        .boardSlipPicked {
+          margin-top: 10px;
+          padding-top: 10px;
+          border-top: 1px solid rgba(255,255,255,0.08);
+          display: grid;
+          gap: 6px;
           text-align: center;
         }
 
-        .boardLockedInput input {
-          opacity: 0.88;
+        .boardSlipPickedLabel {
+          color: var(--muted);
+          font-size: 11px;
+          font-weight: 800;
+          letter-spacing: 0.08em;
+        }
+
+        .boardSlipPickedValue {
+          font-size: 15px;
+          font-weight: 900;
+        }
+
+        .boardSlipDetailGrid {
+          display: grid;
+          grid-template-columns: 1fr 1fr;
+          gap: 12px;
+          margin-top: 12px;
+        }
+
+        .boardSlipDetailCard {
+          padding: 12px;
+          border-radius: 16px;
+          border: 1px solid rgba(255,255,255,0.08);
+          background: rgba(255,255,255,0.035);
+        }
+
+        .boardSlipDetailCardLabel {
+          color: var(--muted);
+          font-size: 11px;
+          font-weight: 800;
+          letter-spacing: 0.08em;
+          margin-bottom: 6px;
+          text-transform: uppercase;
+        }
+
+        .boardSlipDetailCardValue {
+          font-size: 16px;
+          font-weight: 900;
+        }
+
+        .strongMessage {
+          font-size: 14px;
+          font-weight: 900;
+          letter-spacing: 0.02em;
         }
 
         .skeleton {
@@ -2937,264 +3746,263 @@ export default function App() {
 
         .compactMeta {
           margin-top: 11px;
-          font-size: 13px;
           color: var(--muted);
         }
 
         .homePage {
-  max-width: 1220px;
-  margin: 0 auto;
-}
-
-.homeStickyWrap {
-  position: sticky;
-  top: var(--homeStickyTop);
-  z-index: 90;
-  margin-top: -20px;
-  margin-bottom: 14px;
-  border-radius: 28px;
-  border: 1px solid rgba(255,255,255,0.08);
-  box-shadow: 0 18px 40px rgba(0,0,0,0.34);
-  overflow: hidden;
-  isolation: isolate;
-  background:
-    radial-gradient(circle at top left, rgba(70,215,255,0.08), transparent 24%),
-    radial-gradient(circle at bottom center, rgba(167,225,95,0.06), transparent 22%),
-    linear-gradient(180deg, rgba(13,17,24,0.98), rgba(7,10,15,0.99));
-}
-
-.homeStickyWrap::before {
-  content: "";
-  position: absolute;
-  inset: 0;
-  pointer-events: none;
-  background:
-    radial-gradient(circle at 10% 12%, rgba(70,215,255,0.10), transparent 14%),
-    radial-gradient(circle at 90% 86%, rgba(167,225,95,0.10), transparent 18%);
-  opacity: 0.5;
-  z-index: 0;
-}
-
-.homeStickyPanel {
-  position: relative;
-  z-index: 1;
-  display: grid;
-  gap: 0;
-  padding: 16px;
-  background: rgba(8,12,18,0.94);
-}
-
-.homeStickyRow {
-  position: relative;
-  z-index: 1;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  padding: 10px 0;
-}
-
-.homeStickyRow + .homeStickyRow {
-  border-top: 1px solid rgba(255,255,255,0.06);
-}
-
-.homeStickyUserBlock {
-  min-width: 0;
-}
-
-.homeStickyEyebrow {
-  color: var(--muted);
-  font-size: 12px;
-  margin-bottom: 4px;
-}
-
-.homeStickyUser {
-  font-size: 16px;
-  font-weight: 800;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.homeStickyBoardTitle {
-  font-size: 20px;
-  font-weight: 900;
-  margin: 0;
-}
-
-.homeStickyMeta {
-  color: var(--muted);
-  font-size: 12px;
-  white-space: nowrap;
-}
-
-.searchWrap {
-  margin-top: 0;
-  padding-top: 10px;
-  border-top: 1px solid rgba(255,255,255,0.06);
-  position: relative;
-  z-index: 1;
-}
-
-.homeCard {
-  overflow: hidden;
-}
-
-.boardList {
-  display: grid;
-  gap: 10px;
-}
-
-.boardGameCard {
-  background: rgba(10, 14, 20, 0.92);
-  border: 1px solid rgba(255,255,255,0.08);
-  border-radius: 14px;
-  padding: 8px 10px 10px;
-  box-shadow: inset 0 0 0 1px rgba(255,255,255,0.015);
-  scroll-margin-top: calc(var(--homeStickyTop) + 150px);
-}
-
-.boardGameCard.searchHit {
-  border-color: rgba(70,215,255,0.42);
-  box-shadow:
-    inset 0 0 0 1px rgba(255,255,255,0.015),
-    0 0 0 1px rgba(70,215,255,0.20),
-    0 0 20px rgba(70,215,255,0.12);
-}
-
-.boardHeaderRow {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) 300px;
-  align-items: center;
-  gap: 10px;
-  margin-bottom: 6px;
-}
-
-.boardHeaderLeft {
-  font-size: 10px;
-  color: #c7cfda;
-  opacity: 0.9;
-  font-weight: 700;
-  letter-spacing: 0.02em;
-}
-
-.boardHeaderMarkets {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 6px;
-}
-
-.boardHeaderCell {
-  text-align: center;
-  font-size: 9px;
-  color: #b3bcc7;
-  opacity: 0.85;
-  font-weight: 800;
-  letter-spacing: 0.08em;
-}
-
-.boardTeamRow {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) 300px;
-  gap: 10px;
-  align-items: center;
-  margin-bottom: 6px;
-}
-
-.boardTeamRow:last-of-type {
-  margin-bottom: 0;
-}
-
-.boardTeamInfo {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  min-width: 0;
-}
-
-.boardTeamName {
-  font-size: 12px;
-  font-weight: 800;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.boardMarketGrid {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 6px;
-}
-
-.boardMarketCell {
-  border: 1px solid rgba(255,255,255,0.08);
-  background: rgba(255,255,255,0.04);
-  color: #edf2f7;
-  border-radius: 8px;
-  min-height: 38px;
-  padding: 5px 4px;
-  display: flex;
-  flex-direction: column;
-  justify-content: center;
-  align-items: center;
-  cursor: pointer;
-  box-shadow: inset 0 0 0 1px rgba(255,255,255,0.015);
-}
-
-.boardMarketCell:hover {
-  background: rgba(255,255,255,0.08);
-  border-color: rgba(70,215,255,0.22);
-}
-
-.boardMainValue {
-  font-size: 11px;
-  font-weight: 800;
-  line-height: 1;
-}
-
-.boardSubValue {
-  margin-top: 3px;
-  font-size: 9px;
-  color: #9ee3b0;
-  line-height: 1;
-  min-height: 9px;
-}
-
-.boardBottomActions {
-  display: flex;
-  justify-content: center;
-  margin-top: 14px;
-}
-
-        @media (max-width: 900px) {
-          .logoTitle {
-            font-size: 40px;
-          }
+          max-width: 1220px;
+          margin: 0 auto;
         }
 
-        @media (max-width: 980px) {
+        .homeStickyWrap {
+          position: sticky;
+          top: var(--homeStickyTop);
+          z-index: 90;
+          margin-top: -20px;
+          margin-bottom: 12px;
+          border-radius: 28px;
+          border: 1px solid rgba(255,255,255,0.08);
+          box-shadow: 0 18px 40px rgba(0,0,0,0.34);
+          overflow: hidden;
+          isolation: isolate;
+          background:
+            radial-gradient(circle at top left, rgba(70,215,255,0.08), transparent 24%),
+            radial-gradient(circle at bottom center, rgba(167,225,95,0.06), transparent 22%),
+            linear-gradient(180deg, rgba(13,17,24,0.99), rgba(7,10,15,1));
+        }
+
+        .homeStickyWrap::before {
+          content: "";
+          position: absolute;
+          inset: 0;
+          pointer-events: none;
+          background:
+            radial-gradient(circle at 10% 12%, rgba(70,215,255,0.10), transparent 14%),
+            radial-gradient(circle at 90% 86%, rgba(167,225,95,0.10), transparent 18%);
+          opacity: 0.5;
+          z-index: 0;
+        }
+
+        .homeStickyPanel {
+          position: relative;
+          z-index: 1;
+          display: grid;
+          gap: 0;
+          padding: 12px 16px;
+          background: rgba(8,12,18,0.98);
+        }
+
+        .homeStickyRow {
+          position: relative;
+          z-index: 1;
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          gap: 12px;
+          padding: 7px 0;
+        }
+
+        .homeStickyRow + .homeStickyRow {
+          border-top: 1px solid rgba(255,255,255,0.06);
+        }
+
+        .homeStickyUserBlock {
+          min-width: 0;
+        }
+
+        .homeStickyEyebrow {
+          color: var(--muted);
+          font-size: 11px;
+          margin-bottom: 3px;
+        }
+
+        .homeStickyUser {
+          font-size: 15px;
+          font-weight: 800;
+          white-space: nowrap;
+          overflow: hidden;
+          text-overflow: ellipsis;
+        }
+
+        .homeStickyBoardTitle {
+          font-size: 18px;
+          font-weight: 900;
+          margin: 0;
+        }
+
+        .homeStickyMeta {
+          color: var(--muted);
+          font-size: 12px;
+          white-space: nowrap;
+        }
+
+        .homeCard {
+          overflow: hidden;
+        }
+
+        .boardList {
+          display: grid;
+          gap: 8px;
+        }
+
+        .boardGameCard {
+          background: rgba(10, 14, 20, 0.92);
+          border: 1px solid rgba(255,255,255,0.08);
+          border-radius: 14px;
+          padding: 7px 9px 8px;
+          box-shadow: inset 0 0 0 1px rgba(255,255,255,0.015);
+          scroll-margin-top: calc(var(--homeStickyTop) + 150px);
+        }
+
+        .boardGameCard.searchHit {
+          border-color: rgba(70,215,255,0.42);
+          box-shadow:
+            inset 0 0 0 1px rgba(255,255,255,0.015),
+            0 0 0 1px rgba(70,215,255,0.20),
+            0 0 20px rgba(70,215,255,0.12);
+        }
+
+        .boardHeaderRow {
+          display: grid;
+          grid-template-columns: minmax(0, 1fr) 300px;
+          align-items: center;
+          gap: 10px;
+          margin-bottom: 5px;
+        }
+
+        .boardHeaderLeft {
+          font-size: 10px;
+          color: #c7cfda;
+          opacity: 0.9;
+          font-weight: 700;
+          letter-spacing: 0.02em;
+        }
+
+        .boardHeaderMarkets {
+          display: grid;
+          grid-template-columns: repeat(3, minmax(0, 1fr));
+          gap: 6px;
+        }
+
+        .boardHeaderCell {
+          text-align: center;
+          font-size: 9px;
+          color: #b3bcc7;
+          opacity: 0.85;
+          font-weight: 800;
+          letter-spacing: 0.08em;
+        }
+
+        .boardTeamRow {
+          display: grid;
+          grid-template-columns: minmax(0, 1fr) 300px;
+          gap: 10px;
+          align-items: center;
+          margin-bottom: 5px;
+        }
+
+        .boardTeamRow:last-of-type {
+          margin-bottom: 0;
+        }
+
+        .boardTeamInfo {
+          display: flex;
+          align-items: center;
+          gap: 8px;
+          min-width: 0;
+        }
+
+        .boardTeamName {
+          font-size: 12px;
+          font-weight: 800;
+          white-space: nowrap;
+          overflow: hidden;
+          text-overflow: ellipsis;
+        }
+
+        .boardScore {
+          margin-left: auto;
+          font-size: 13px;
+          font-weight: 900;
+          color: #f4f7fb;
+        }
+
+        .boardMarketGrid {
+          display: grid;
+          grid-template-columns: repeat(3, minmax(0, 1fr));
+          gap: 6px;
+        }
+
+        .boardMarketCell {
+          border: 1px solid rgba(255,255,255,0.08);
+          background: rgba(255,255,255,0.04);
+          color: #edf2f7;
+          border-radius: 8px;
+          min-height: 36px;
+          padding: 4px 4px;
+          display: flex;
+          flex-direction: column;
+          justify-content: center;
+          align-items: center;
+          cursor: pointer;
+          box-shadow: inset 0 0 0 1px rgba(255,255,255,0.015);
+        }
+
+        .boardMarketCell:hover {
+          background: rgba(255,255,255,0.08);
+          border-color: rgba(70,215,255,0.22);
+        }
+
+        .boardMainValue {
+          font-size: 11px;
+          font-weight: 800;
+          line-height: 1;
+        }
+
+        .boardSubValue {
+          margin-top: 3px;
+          font-size: 9px;
+          color: #9ee3b0;
+          line-height: 1;
+          min-height: 9px;
+        }
+
+        .boardBottomActions {
+          display: flex;
+          justify-content: center;
+          margin-top: 14px;
+        }
+
+        @media (max-width: 860px) {
           .boardHeaderRow,
           .boardTeamRow {
-            grid-template-columns: minmax(0, 1fr);
+            grid-template-columns: 1fr;
           }
 
           .boardHeaderMarkets,
           .boardMarketGrid {
-            width: 100%;
+            grid-template-columns: repeat(3, minmax(0, 1fr));
+          }
+
+          .boardScore {
+            margin-left: 0;
+          }
+
+          .boardSlipDetailGrid {
+            grid-template-columns: 1fr;
           }
         }
 
         @media (max-width: 760px) {
-  :root {
-    --stickyOffset: 0px;
-    --topbarHeight: 88px;
-    --homeStickyTop: var(--topbarHeight);
-  }
+          :root {
+            --stickyOffset: 0px;
+            --topbarHeight: 88px;
+            --homeStickyTop: var(--topbarHeight);
+          }
 
-  .appShell {
-    padding: 12px;
-  }
-}
+          .appShell {
+            padding: 12px;
+          }
 
           .topbar {
             grid-template-columns: 1fr auto;
@@ -3289,656 +4097,134 @@ export default function App() {
       `}</style>
 
       <div className="appShell">
-        <header className="topbar">
+        <div className="topbar">
           <div className="logoCenterWrap">
-            <SettleUpLogo centered />
+            <SettleUpLogo centered small />
             <div className="headerGlow" />
           </div>
 
-          <div className="menuWrap" onClick={(e) => e.stopPropagation()}>
-            <button className="menuBtn" onClick={() => setMenuOpen((p) => !p)}>
+          <div className="menuWrap">
+            <button
+              className="menuBtn"
+              onClick={(e) => {
+                e.stopPropagation();
+                setMenuOpen((prev) => !prev);
+              }}
+            >
               ☰
             </button>
 
             {menuOpen && (
               <div className="menuPanel">
                 <button onClick={() => goToPage("home")}>Home</button>
-                <button onClick={() => goToPage("account")}>My Account</button>
+                <button
+                  onClick={() => {
+                    setMenuOpen(false);
+                    resetCreateBetModal();
+                    setShowCreateBetModal(true);
+                  }}
+                >
+                  Create Bet
+                </button>
                 <button onClick={() => goToPage("mybets")}>My Bets</button>
-                <button onClick={() => goToPage("settleup")}>Settle Up</button>
-                <button onClick={() => goToPage("history")}>Bet History</button>
+                <button onClick={() => goToPage("leaderboard")}>Leaderboard</button>
+                <button onClick={() => goToPage("history")}>History</button>
+                <button onClick={() => goToPage("settle")}>Settle Up</button>
+                <button onClick={() => goToPage("account")}>Account</button>
                 <button onClick={handleLogout}>Logout</button>
               </div>
             )}
           </div>
-        </header>
+        </div>
 
-        {showLockedState ? (
-          <div className="shellFade">
-            {renderSkeletonScreen()}
+        <div className={`pageGrid ${pageLoading ? "" : "shellFade"}`}>
+          {showLockedState ? (
+            renderSkeletonScreen()
+          ) : (
+            <>
+              {page === "home" && (
+                <section className="homePage">
+                  <div className="homeStickyWrap">
+                    <div className="homeStickyPanel">
+                      <div className="homeStickyRow">
+                        <div className="homeStickyUserBlock">
+                          <div className="homeStickyEyebrow">Logged in</div>
+                          <div className="homeStickyUser">{currentUser?.username}</div>
+                        </div>
+                      </div>
 
-            {!authLoading && !session && (
-              <div className="modalBackdrop">
-                <div className="modal authModal">
-                  <SettleUpLogo centered small />
+                      <div className="homeStickyRow">
+                        <h2 className="homeStickyBoardTitle">
+                          Today’s Classic Bet Board
+                        </h2>
+                        <div className="homeStickyMeta">
+                          {todayBoardLoading
+                            ? "Loading games..."
+                            : todayBoardError
+                            ? todayBoardError
+                            : `${todayBoard.length} games`}
+                        </div>
+                      </div>
 
-                  <h1 className="modalTitle">
-                    {authMode === "signup" ? "Create account" : "Sign In"}
-                  </h1>
-
-                  <p className="modalCopy">
-                    Create an account or sign in to access SettleUp Bet Tracker.
-                  </p>
-
-                  <div className="authToggleRow">
-                    <button
-                      className={authMode === "signup" ? "tabBtn active" : "tabBtn"}
-                      onClick={() => {
-                        setAuthMode("signup");
-                        setAuthError("");
-                      }}
-                    >
-                      Create Account
-                    </button>
-                    <button
-                      className={authMode === "login" ? "tabBtn active" : "tabBtn"}
-                      onClick={() => {
-                        setAuthMode("login");
-                        setAuthError("");
-                      }}
-                    >
-                      Sign In
-                    </button>
-                  </div>
-
-                  {authMode === "signup" ? (
-                    <>
-                      <div className="fieldGroup">
-                        <label>Username</label>
+                      <div className="searchWrap">
                         <input
-                          value={signupUsername}
-                          onChange={(e) => setSignupUsername(e.target.value)}
-                          placeholder="Enter username"
+                          placeholder="Search by team…"
+                          value={boardSearch}
+                          onChange={(e) => setBoardSearch(e.target.value)}
                         />
                       </div>
-
-                      <div className="fieldGroup">
-                        <label>Email</label>
-                        <input
-                          value={signupEmail}
-                          onChange={(e) => setSignupEmail(e.target.value)}
-                          placeholder="Enter email"
-                        />
-                      </div>
-
-                      <div className="fieldGroup">
-                        <label>Password</label>
-                        <input
-                          type="password"
-                          value={signupPassword}
-                          onChange={(e) => setSignupPassword(e.target.value)}
-                          placeholder="Enter password"
-                        />
-                      </div>
-
-                      {authError && <div className="msgErr">{authError}</div>}
-
-                      <button className="greenBtn full" style={{ marginTop: 18 }} onClick={handleSignup}>
-                        Create Account
-                      </button>
-                    </>
-                  ) : (
-                    <>
-                      <div className="fieldGroup">
-                        <label>Email</label>
-                        <input
-                          value={loginEmail}
-                          onChange={(e) => setLoginEmail(e.target.value)}
-                          placeholder="Enter email"
-                        />
-                      </div>
-
-                      <div className="fieldGroup">
-                        <label>Password</label>
-                        <input
-                          type="password"
-                          value={loginPassword}
-                          onChange={(e) => setLoginPassword(e.target.value)}
-                          placeholder="Enter password"
-                        />
-                      </div>
-
-                      {authError && <div className="msgErr">{authError}</div>}
-
-                      <button className="greenBtn full" style={{ marginTop: 18 }} onClick={handleLogin}>
-                        Sign In
-                      </button>
-                    </>
-                  )}
-                </div>
-              </div>
-            )}
-          </div>
-        ) : (
-          <div className={`shellFade ${pageLoading ? "pageLoading" : ""}`} style={{ overflow: "visible" }}>
-            {showCreateBetModal && (
-              <div className="modalBackdrop">
-                <div className="modal createBetModal">
-                  <button
-                    className="closeX"
-                    onClick={() => {
-                      setShowCreateBetModal(false);
-                      resetCreateBetModal();
-                    }}
-                  >
-                    ×
-                  </button>
-
-                  <SettleUpLogo centered small />
-                  <h2 className="modalTitle">Create a Bet</h2>
-
-                  <div className="fieldGroup">
-                    <label>Proposed By</label>
-                    <input value={currentUser?.username || ""} disabled />
-                  </div>
-
-                  <div className="fieldGroup">
-                    <label>Select Opponent Username</label>
-                    <input
-                      value={opponentSearch}
-                      onChange={(e) => {
-                        setOpponentSearch(e.target.value);
-                        setSelectedOpponentId("");
-                        setCreateBetError("");
-                      }}
-                      placeholder="Start typing a username"
-                    />
-                    {opponentSearch && !selectedOpponentId && (
-                      <div className="autocompleteBox">
-                        {filteredOpponentOptions.length ? (
-                          filteredOpponentOptions.map((user) => (
-                            <button
-                              key={user.id}
-                              className="autocompleteItem"
-                              onClick={() => {
-                                setSelectedOpponentId(user.id);
-                                setOpponentSearch(user.username);
-                              }}
-                            >
-                              {user.username}
-                            </button>
-                          ))
-                        ) : (
-                          <div className="smallPad" style={{ color: "#98a1ae" }}>
-                            No dropdown match. Exact username text will still work.
-                          </div>
-                        )}
-                      </div>
-                    )}
-                  </div>
-
-                  <div className="fieldGroup">
-                    <label>Bet Type</label>
-                    <div className="radioRow">
-                      <button
-                        type="button"
-                        className={betMode === "classic" ? "radioBtn active" : "radioBtn"}
-                        onClick={() => setBetMode("classic")}
-                      >
-                        Classic Bet
-                      </button>
-                      <button
-                        type="button"
-                        className={betMode === "custom" ? "radioBtn active" : "radioBtn"}
-                        onClick={() => setBetMode("custom")}
-                      >
-                        Custom Bet
-                      </button>
                     </div>
                   </div>
 
-                  {betMode === "custom" ? (
-                    <div className="fieldGroup">
-                      <label>Bet Details</label>
-                      <textarea
-                        value={customBetDetails}
-                        onChange={(e) => setCustomBetDetails(e.target.value)}
-                        placeholder="Write out the bet"
-                      />
-                    </div>
-                  ) : (
-                    <>
-                      <div className="twoCol">
-                        <div className="fieldGroup">
-                          <label>Taking</label>
-                          <input
-                            value={takingTeam}
-                            onChange={(e) => setTakingTeam(e.target.value)}
-                            placeholder="Team / side you are taking"
-                          />
-                        </div>
-                        <div className="fieldGroup">
-                          <label>Against</label>
-                          <input
-                            value={againstTeam}
-                            onChange={(e) => setAgainstTeam(e.target.value)}
-                            placeholder="Team / side you are against"
-                          />
-                        </div>
-                      </div>
-
-                      <div className="fieldGroup">
-                        <label>Market</label>
-                        <div className="radioRow">
-                          <button
-                            type="button"
-                            className={marketType === "total" ? "radioBtn active" : "radioBtn"}
-                            onClick={() => {
-                              setMarketType("total");
-                              setClassicOdds("+100");
-                            }}
-                          >
-                            Total
-                          </button>
-                          <button
-                            type="button"
-                            className={marketType === "side" ? "radioBtn active" : "radioBtn"}
-                            onClick={() => {
-                              setMarketType("side");
-                              if (sidePick !== "ml") setClassicOdds("+100");
-                            }}
-                          >
-                            ML / Spread
-                          </button>
-                        </div>
-                      </div>
-
-                      {marketType === "total" ? (
-                        <div className="twoCol">
-                          <div className="fieldGroup">
-                            <label>Pick</label>
-                            <div className="radioRow">
-                              <button
-                                type="button"
-                                className={totalPick === "over" ? "radioBtn active" : "radioBtn"}
-                                onClick={() => setTotalPick("over")}
-                              >
-                                Over
-                              </button>
-                              <button
-                                type="button"
-                                className={totalPick === "under" ? "radioBtn active" : "radioBtn"}
-                                onClick={() => setTotalPick("under")}
-                              >
-                                Under
-                              </button>
-                            </div>
-                          </div>
-                          <div className="fieldGroup">
-                            <label>Number</label>
-                            <input
-                              value={totalNumber}
-                              onChange={(e) =>
-                                setTotalNumber(e.target.value.replace(/[^\d.]/g, ""))
-                              }
-                              placeholder="158"
-                            />
-                          </div>
-                        </div>
-                      ) : (
-                        <div className="twoCol">
-                          <div className="fieldGroup">
-                            <label>Pick</label>
-                            <div className="radioRow">
-                              <button
-                                type="button"
-                                className={sidePick === "ml" ? "radioBtn active" : "radioBtn"}
-                                onClick={() => {
-                                  setSidePick("ml");
-                                }}
-                              >
-                                ML
-                              </button>
-                              <button
-                                type="button"
-                                className={sidePick === "plus" ? "radioBtn active" : "radioBtn"}
-                                onClick={() => {
-                                  setSidePick("plus");
-                                  setClassicOdds("+100");
-                                }}
-                              >
-                                +
-                              </button>
-                              <button
-                                type="button"
-                                className={sidePick === "minus" ? "radioBtn active" : "radioBtn"}
-                                onClick={() => {
-                                  setSidePick("minus");
-                                  setClassicOdds("+100");
-                                }}
-                              >
-                                -
-                              </button>
-                            </div>
-                          </div>
-                          <div className="fieldGroup">
-                            <label>{sidePick === "ml" ? "Line" : "Spread"}</label>
-                            <input
-                              value={sidePick === "ml" ? "EVEN" : sideNumber}
-                              onChange={(e) =>
-                                sidePick === "ml"
-                                  ? null
-                                  : setSideNumber(e.target.value.replace(/[^\d.]/g, ""))
-                              }
-                              disabled={sidePick === "ml"}
-                              placeholder={sidePick === "ml" ? "EVEN" : "7"}
-                            />
-                          </div>
-                        </div>
+                  <section className="prettyCard homeCard">
+                    <div className="boardList">
+                      {todayBoardLoading && (
+                        <div className="emptyState">Loading games…</div>
                       )}
 
-                      <div className="fieldGroup">
-                        <label>Odds</label>
-                        <div className="moneyInput oddsInput">
-                          <span>US</span>
-                          <input
-                            value={classicOdds}
-                            onChange={(e) => handleClassicOddsChange(e.target.value)}
-                            onBlur={handleClassicOddsBlur}
-                            placeholder="+100"
-                          />
-                        </div>
-                        <div className="helperText">
-                          Moneyline uses selected odds. Spread and total are always +100.
-                        </div>
-                      </div>
-                    </>
-                  )}
-
-                  <div className="twoCol">
-                    <div className="fieldGroup">
-                      <label>Bet Amount</label>
-                      <div className="moneyInput">
-                        <span>$</span>
-                        <input
-                          value={betAmount}
-                          onChange={(e) => handleAmountChange(e.target.value)}
-                          placeholder="0"
-                        />
-                      </div>
-                    </div>
-
-                    <div className="fieldGroup">
-                      <label>Win Amount</label>
-                      <div className="moneyInput">
-                        <span>$</span>
-                        <input
-                          value={winAmount}
-                          onChange={(e) =>
-                            betMode === "custom"
-                              ? setWinAmount(sanitizeMoneyInput(e.target.value))
-                              : null
-                          }
-                          readOnly={betMode === "classic"}
-                          placeholder="0"
-                        />
-                      </div>
-                      {betMode === "classic" && (
-                        <div className="helperText">
-                          Auto-calculated from your stake and odds.
-                        </div>
+                      {!todayBoardLoading && todayBoardError && (
+                        <div className="emptyState">{todayBoardError}</div>
                       )}
-                    </div>
-                  </div>
 
-                  {createBetError && <div className="msgErr">{createBetError}</div>}
-
-                  <button className="greenBtn full" style={{ marginTop: 18 }} onClick={handleCreateBet}>
-                    Propose Bet
-                  </button>
-                </div>
-              </div>
-            )}
-
-            {showBoardBetModal && (
-              <div className="modalBackdrop">
-                <div className="modal boardBetModal">
-                  <button
-                    className="closeX"
-                    onClick={() => {
-                      setShowBoardBetModal(false);
-                      resetBoardBetModal();
-                    }}
-                  >
-                    ×
-                  </button>
-
-                  <SettleUpLogo centered small />
-                  <h2 className="modalTitle">Propose Bet</h2>
-                  <p className="modalCopy">Selected from the today classic bet board.</p>
-
-                  <div className="boardSlipMatchup">
-                    {boardTakingTeam} vs {boardAgainstTeam}
-                  </div>
-
-                  <div className="fieldGroup">
-                    <label>Proposed By</label>
-                    <input value={currentUser?.username || ""} disabled />
-                  </div>
-
-                  <div className="fieldGroup">
-                    <label>Select Opponent Username</label>
-                    <input
-                      value={boardOpponentSearch}
-                      onChange={(e) => {
-                        setBoardOpponentSearch(e.target.value);
-                        setBoardSelectedOpponentId("");
-                        setCreateBetError("");
-                      }}
-                      placeholder="Start typing a username"
-                    />
-                    {boardOpponentSearch && !boardSelectedOpponentId && (
-                      <div className="autocompleteBox">
-                        {filteredBoardOpponentOptions.length ? (
-                          filteredBoardOpponentOptions.map((user) => (
-                            <button
-                              key={user.id}
-                              className="autocompleteItem"
-                              onClick={() => {
-                                setBoardSelectedOpponentId(user.id);
-                                setBoardOpponentSearch(user.username);
-                              }}
-                            >
-                              {user.username}
-                            </button>
-                          ))
-                        ) : (
-                          <div className="smallPad" style={{ color: "#98a1ae" }}>
-                            No dropdown match. Exact username text will still work.
+                      {!todayBoardLoading &&
+                        !todayBoardError &&
+                        visibleTodayBoard.length === 0 && (
+                          <div className="emptyState">
+                            No basketball games available right now.
                           </div>
                         )}
-                      </div>
-                    )}
-                  </div>
 
-                  <div className="threeCol">
-                    <div className="fieldGroup">
-                      <label>Market</label>
-                      <input
-                        value={
-                          boardMarketType === "total"
-                            ? "Total"
-                            : boardSidePick === "ml"
-                            ? "Moneyline"
-                            : "Spread"
-                        }
-                        disabled
-                      />
-                    </div>
+                      {!todayBoardLoading &&
+                        !todayBoardError &&
+                        visibleTodayBoard.map((game) => {
+                          const isSearchHit =
+                            boardSearch &&
+                            todayBoard.findIndex(
+                              (g) =>
+                                g.id === game.id &&
+                                `${g.awayTeam} ${g.homeTeam}`
+                                  .toLowerCase()
+                                  .includes(boardSearch.trim().toLowerCase())
+                            ) === boardSearchMatchIndex;
 
-                    {boardMarketType === "total" ? (
-                      <>
-                        <div className="fieldGroup">
-                          <label>Pick</label>
-                          <input
-                            value={boardTotalPick === "over" ? "Over" : "Under"}
-                            disabled
-                          />
-                        </div>
-
-                        <div className="fieldGroup">
-                          <label>Number</label>
-                          <input value={boardTotalNumber} disabled />
-                        </div>
-                      </>
-                    ) : boardSidePick === "ml" ? (
-                      <>
-                        <div className="fieldGroup">
-                          <label>Pick</label>
-                          <input value="ML" disabled />
-                        </div>
-
-                        <div className="fieldGroup">
-                          <label>Line</label>
-                          <input value="EVEN" disabled />
-                        </div>
-                      </>
-                    ) : (
-                      <>
-                        <div className="fieldGroup" style={{ gridColumn: "span 2" }}>
-                          <label>Spread</label>
-                          <input
-                            value={formatSignedLine(boardSidePick, boardSideNumber)}
-                            disabled
-                          />
-                        </div>
-                      </>
-                    )}
-                  </div>
-
-                  <div className="twoCol">
-                    <div className="fieldGroup">
-                      <label>Taking Team</label>
-                      <input value={boardTakingTeam} disabled />
-                    </div>
-                    <div className="fieldGroup">
-                      <label>Opponent Team</label>
-                      <input value={boardAgainstTeam} disabled />
-                    </div>
-                  </div>
-
-                  <div className="fieldGroup">
-                    <label>Odds</label>
-                    <div className="moneyInput oddsInput boardLockedInput">
-                      <span>US</span>
-                      <input value={boardClassicOdds || "+100"} disabled />
-                    </div>
-                    <div className="helperText">
-                      Totals and spreads stay +100. Moneyline uses the real board value.
-                    </div>
-                  </div>
-
-                  <div className="twoCol">
-                    <div className="fieldGroup">
-                      <label>Bet Amount</label>
-                      <div className="moneyInput">
-                        <span>$</span>
-                        <input
-                          value={boardBetAmount}
-                          onChange={(e) => handleBoardAmountChange(e.target.value)}
-                          placeholder="0"
-                        />
-                      </div>
-                    </div>
-
-                    <div className="fieldGroup">
-                      <label>Win Amount</label>
-                      <div className="moneyInput">
-                        <span>$</span>
-                        <input value={boardWinAmount} readOnly placeholder="0" />
-                      </div>
-                      <div className="helperText">
-                        Spread/total win equals stake. Moneyline uses the selected odds.
-                      </div>
-                    </div>
-                  </div>
-
-                  {createBetError && <div className="msgErr">{createBetError}</div>}
-
-                  <button
-                    className="greenBtn full"
-                    style={{ marginTop: 14 }}
-                    onClick={handleCreateBoardBet}
-                  >
-                    Propose Bet
-                  </button>
-                </div>
-              </div>
-            )}
-
-            {page === "home" && (
-              <section className="homePage">
-                <div className="homeStickyWrap">
-                  <div className="homeStickyPanel">
-                    <div className="homeStickyRow">
-                      <div className="homeStickyUserBlock">
-                        <div className="homeStickyEyebrow">Logged in as</div>
-                        <div className="homeStickyUser">{currentUser?.username || "User"}</div>
-                      </div>
-
-                      <button className="greenBtn" onClick={() => setShowCreateBetModal(true)}>
-                        Create Bet
-                      </button>
-                    </div>
-
-                    <div className="homeStickyRow">
-                      <h2 className="homeStickyBoardTitle">Today&apos;s Classic Bet Board</h2>
-                      <div className="homeStickyMeta">
-                        {todayBoardLoading
-                          ? "Loading games..."
-                          : `${todayBoard.length} basketball game${todayBoard.length === 1 ? "" : "s"}`}
-                      </div>
-                    </div>
-
-                    <div className="searchWrap">
-                      <input
-                        value={boardSearch}
-                        onChange={(e) => setBoardSearch(e.target.value)}
-                        placeholder="Search by team name to jump to a game"
-                      />
-                    </div>
-                  </div>
-                </div>
-
-                <section className="prettyCard homeCard">
-                  {todayBoardError ? (
-                    <div className="emptyState">{todayBoardError}</div>
-                  ) : todayBoardLoading && !todayBoard.length ? (
-                    <div className="emptyState">Loading games...</div>
-                  ) : !todayBoard.length ? (
-                    <div className="emptyState">No games available right now.</div>
-                  ) : (
-                    <>
-                      <div className="boardList">
-                        {visibleTodayBoard.map((game, idx) => {
-                          const isHit = idx === boardSearchMatchIndex;
                           return (
                             <div
-                              key={game.id || idx}
+                              key={game.id}
                               ref={(el) => {
                                 if (el) gameRefs.current[game.id] = el;
                               }}
-                              className={`boardGameCard ${isHit ? "searchHit" : ""}`}
+                              className={`boardGameCard ${
+                                isSearchHit ? "searchHit" : ""
+                              }`}
                             >
                               <div className="boardHeaderRow">
                                 <div className="boardHeaderLeft">
-                                  {game.sportTitle} • {formatBoardTime(game.commenceTime)}
+                                  {formatBoardTime(game.commenceTime)} {game.statusText}
                                 </div>
-
                                 <div className="boardHeaderMarkets">
                                   <div className="boardHeaderCell">ML</div>
-                                  <div className="boardHeaderCell">SPR</div>
-                                  <div className="boardHeaderCell">TOT</div>
+                                  <div className="boardHeaderCell">SPREAD</div>
+                                  <div className="boardHeaderCell">TOTAL</div>
                                 </div>
                               </div>
 
@@ -3946,6 +4232,9 @@ export default function App() {
                                 <div className="boardTeamInfo">
                                   <TeamLogo src={game.awayLogo} name={game.awayTeam} />
                                   <div className="boardTeamName">{game.awayTeam}</div>
+                                  {game.awayScore !== "" && (
+                                    <div className="boardScore">{game.awayScore}</div>
+                                  )}
                                 </div>
 
                                 <div className="boardMarketGrid">
@@ -3955,15 +4244,18 @@ export default function App() {
                                       openBoardBetModal({
                                         takingTeam: game.awayTeam,
                                         againstTeam: game.homeTeam,
+                                        takingLogo: game.awayLogo,
+                                        againstLogo: game.homeLogo,
                                         marketType: "side",
                                         sidePick: "ml",
                                         sideNumber: "EVEN",
-                                        odds: game.moneyline?.away || "+100",
+                                        odds: game.moneyline.away,
                                       })
                                     }
                                   >
-                                    <div className="boardMainValue">{game.moneyline?.away || "—"}</div>
-                                    <div className="boardSubValue">Moneyline</div>
+                                    <div className="boardMainValue">
+                                      {game.moneyline.away || "—"}
+                                    </div>
                                   </button>
 
                                   <button
@@ -3972,15 +4264,17 @@ export default function App() {
                                       openBoardBetModal({
                                         takingTeam: game.awayTeam,
                                         againstTeam: game.homeTeam,
+                                        takingLogo: game.awayLogo,
+                                        againstLogo: game.homeLogo,
                                         marketType: "side",
-                                        sidePick: game.spread?.away?.sidePick || "plus",
-                                        sideNumber: game.spread?.away?.sideNumber || "",
+                                        sidePick: game.spread.away.sidePick,
+                                        sideNumber: game.spread.away.sideNumber,
                                         odds: "+100",
                                       })
                                     }
                                   >
                                     <div className="boardMainValue">
-                                      {game.spread?.away?.sideNumber
+                                      {game.spread.away.sideNumber
                                         ? formatSignedLine(
                                             game.spread.away.sidePick,
                                             game.spread.away.sideNumber
@@ -3996,15 +4290,16 @@ export default function App() {
                                       openBoardBetModal({
                                         takingTeam: game.awayTeam,
                                         againstTeam: game.homeTeam,
+                                        takingLogo: game.awayLogo,
+                                        againstLogo: game.homeLogo,
                                         marketType: "total",
                                         totalPick: "over",
-                                        totalNumber: game.total?.number || "",
-                                        odds: "+100",
+                                        totalNumber: game.total.number,
                                       })
                                     }
                                   >
                                     <div className="boardMainValue">
-                                      {game.total?.number ? `O ${game.total.number}` : "—"}
+                                      {game.total.number ? `O ${game.total.number}` : "—"}
                                     </div>
                                     <div className="boardSubValue">+100</div>
                                   </button>
@@ -4015,6 +4310,9 @@ export default function App() {
                                 <div className="boardTeamInfo">
                                   <TeamLogo src={game.homeLogo} name={game.homeTeam} />
                                   <div className="boardTeamName">{game.homeTeam}</div>
+                                  {game.homeScore !== "" && (
+                                    <div className="boardScore">{game.homeScore}</div>
+                                  )}
                                 </div>
 
                                 <div className="boardMarketGrid">
@@ -4024,15 +4322,18 @@ export default function App() {
                                       openBoardBetModal({
                                         takingTeam: game.homeTeam,
                                         againstTeam: game.awayTeam,
+                                        takingLogo: game.homeLogo,
+                                        againstLogo: game.awayLogo,
                                         marketType: "side",
                                         sidePick: "ml",
                                         sideNumber: "EVEN",
-                                        odds: game.moneyline?.home || "+100",
+                                        odds: game.moneyline.home,
                                       })
                                     }
                                   >
-                                    <div className="boardMainValue">{game.moneyline?.home || "—"}</div>
-                                    <div className="boardSubValue">Moneyline</div>
+                                    <div className="boardMainValue">
+                                      {game.moneyline.home || "—"}
+                                    </div>
                                   </button>
 
                                   <button
@@ -4041,15 +4342,17 @@ export default function App() {
                                       openBoardBetModal({
                                         takingTeam: game.homeTeam,
                                         againstTeam: game.awayTeam,
+                                        takingLogo: game.homeLogo,
+                                        againstLogo: game.awayLogo,
                                         marketType: "side",
-                                        sidePick: game.spread?.home?.sidePick || "minus",
-                                        sideNumber: game.spread?.home?.sideNumber || "",
+                                        sidePick: game.spread.home.sidePick,
+                                        sideNumber: game.spread.home.sideNumber,
                                         odds: "+100",
                                       })
                                     }
                                   >
                                     <div className="boardMainValue">
-                                      {game.spread?.home?.sideNumber
+                                      {game.spread.home.sideNumber
                                         ? formatSignedLine(
                                             game.spread.home.sidePick,
                                             game.spread.home.sideNumber
@@ -4065,15 +4368,16 @@ export default function App() {
                                       openBoardBetModal({
                                         takingTeam: game.homeTeam,
                                         againstTeam: game.awayTeam,
+                                        takingLogo: game.homeLogo,
+                                        againstLogo: game.awayLogo,
                                         marketType: "total",
                                         totalPick: "under",
-                                        totalNumber: game.total?.number || "",
-                                        odds: "+100",
+                                        totalNumber: game.total.number,
                                       })
                                     }
                                   >
                                     <div className="boardMainValue">
-                                      {game.total?.number ? `U ${game.total.number}` : "—"}
+                                      {game.total.number ? `U ${game.total.number}` : "—"}
                                     </div>
                                     <div className="boardSubValue">+100</div>
                                   </button>
@@ -4082,274 +4386,130 @@ export default function App() {
                             </div>
                           );
                         })}
-                      </div>
-
-                      {visibleBoardCount < todayBoard.length && (
-                        <div className="boardBottomActions">
-                          <button
-                            className="ghostBtn"
-                            onClick={() =>
-                              setVisibleBoardCount((prev) =>
-                                Math.min(prev + BOARD_PAGE_SIZE, todayBoard.length)
-                              )
-                            }
-                          >
-                            Show 50 More
-                          </button>
-                        </div>
-                      )}
-                    </>
-                  )}
-                </section>
-
-                <div className="pageGrid" style={{ marginTop: 18 }}>
-                  <section className="prettyCard">
-                    <div className="pageHeader">
-                      <h2>Open Bets Feed</h2>
                     </div>
 
-                    <div className="scrollList">
-                      {openBetsFeed.length ? (
-                        openBetsFeed.map((bet) => renderBetCard(bet))
-                      ) : (
-                        <div className="emptyState">No open bets posted right now.</div>
-                      )}
-                    </div>
-                  </section>
-
-                  <section className="prettyCard" style={{ marginTop: 18 }}>
-                    <div className="pageHeader">
-                      <h2>Leaderboard</h2>
-                    </div>
-
-                    <div className="filterRow">
-                      {filters.map((filter) => (
+                    {visibleBoardCount < todayBoard.length && (
+                      <div className="boardBottomActions">
                         <button
-                          key={filter}
-                          className={leaderboardFilter === filter ? "filterBtn active" : "filterBtn"}
-                          onClick={() => setLeaderboardFilter(filter)}
+                          className="ghostBtn"
+                          onClick={() =>
+                            setVisibleBoardCount((prev) =>
+                              Math.min(prev + BOARD_PAGE_SIZE, todayBoard.length)
+                            )
+                          }
                         >
-                          {filter}
+                          Show 50 more
                         </button>
-                      ))}
-                    </div>
-
-                    <div className="tableWrap sectionBlock">
-                      <table>
-                        <thead>
-                          <tr>
-                            <th>Player</th>
-                            <th>Net</th>
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {leaderboard.length ? (
-                            leaderboard.map((row) => (
-                              <tr key={row.userId}>
-                                <td>{row.username}</td>
-                                <td className={row.net >= 0 ? "greenText" : "redText"}>
-                                  {currency(row.net)}
-                                </td>
-                              </tr>
-                            ))
-                          ) : (
-                            <tr>
-                              <td colSpan="2" className="emptyCell">
-                                No leaderboard data for this filter yet.
-                              </td>
-                            </tr>
-                          )}
-                        </tbody>
-                      </table>
-                    </div>
+                      </div>
+                    )}
                   </section>
-                </div>
-              </section>
-            )}
-
-            {page === "account" && (
-              <div className="pageGrid">
-                <section className="prettyCard">
-                  <div className="pageHeader">
-                    <h2>My Account</h2>
-                  </div>
-
-                  <div className="twoCol">
-                    <div className="fieldGroup">
-                      <label>Username</label>
-                      <input
-                        value={accountUsername}
-                        onChange={(e) => setAccountUsername(e.target.value)}
-                        placeholder="Username"
-                      />
-                    </div>
-
-                    <div className="fieldGroup">
-                      <label>Email</label>
-                      <input
-                        value={accountEmail}
-                        onChange={(e) => setAccountEmail(e.target.value)}
-                        placeholder="Email"
-                      />
-                    </div>
-                  </div>
-
-                  <div className="twoCol">
-                    <div className="fieldGroup">
-                      <label>First Name</label>
-                      <input
-                        value={accountFirstName}
-                        onChange={(e) => setAccountFirstName(e.target.value)}
-                        placeholder="First name"
-                      />
-                    </div>
-
-                    <div className="fieldGroup">
-                      <label>Last Name</label>
-                      <input
-                        value={accountLastName}
-                        onChange={(e) => setAccountLastName(e.target.value)}
-                        placeholder="Last name"
-                      />
-                    </div>
-                  </div>
-
-                  {accountError && <div className="msgErr">{accountError}</div>}
-                  {accountMessage && <div className="msgOk">{accountMessage}</div>}
-
-                  <button
-                    className="greenBtn"
-                    style={{ marginTop: 18 }}
-                    onClick={handleSaveAccount}
-                    disabled={savingAccount}
-                  >
-                    {savingAccount ? "Saving..." : "Save Account"}
-                  </button>
                 </section>
-              </div>
-            )}
+              )}
 
-            {page === "mybets" && (
-              <div className="pageGrid">
+              {page === "mybets" && (
                 <section className="prettyCard">
                   <div className="pageHeader">
                     <h2>My Bets</h2>
                   </div>
 
                   <div className="sectionBlock">
-                    <h3>Proposed by Me</h3>
+                    <h3>Pending</h3>
                     <div className="scrollList">
-                      {myProposedBets.length ? (
-                        myProposedBets.map((bet) => renderBetCard(bet, { showDelete: true }))
-                      ) : (
-                        <div className="emptyState">No bets proposed by you right now.</div>
+                      {pendingBets.length === 0 && (
+                        <div className="emptyState">No open bets.</div>
                       )}
+                      {pendingBets.map((bet) => renderBetCard(bet, { showGrade: true }))}
                     </div>
                   </div>
 
                   <div className="sectionBlock">
                     <h3>Proposed to Me</h3>
                     <div className="scrollList">
-                      {proposedToMe.length ? (
-                        proposedToMe.map((bet) =>
-                          renderBetCard(bet, { showAcceptDecline: true })
-                        )
-                      ) : (
-                        <div className="emptyState">No bets waiting on you right now.</div>
+                      {proposedToMe.length === 0 && (
+                        <div className="emptyState">No incoming bets.</div>
+                      )}
+                      {proposedToMe.map((bet) =>
+                        renderBetCard(bet, { showAcceptDecline: true })
                       )}
                     </div>
                   </div>
 
                   <div className="sectionBlock">
-                    <h3>Open Bets</h3>
+                    <h3>My Proposals</h3>
                     <div className="scrollList">
-                      {pendingBets.length ? (
-                        pendingBets.map((bet) => renderBetCard(bet, { showGrade: true }))
-                      ) : (
-                        <div className="emptyState">No open bets right now.</div>
+                      {myProposedBets.length === 0 && (
+                        <div className="emptyState">No outgoing bets.</div>
                       )}
-                    </div>
-                  </div>
-
-                  <div className="sectionBlock">
-                    <h3>Awaiting Payment</h3>
-                    <div className="scrollList">
-                      {unpaidGradedBets.length ? (
-                        unpaidGradedBets.map((bet) =>
-                          renderBetCard(bet, { showPayment: true })
-                        )
-                      ) : (
-                        <div className="emptyState">No graded unpaid bets right now.</div>
+                      {myProposedBets.map((bet) =>
+                        renderBetCard(bet, { showDelete: true })
                       )}
                     </div>
                   </div>
                 </section>
-              </div>
-            )}
+              )}
 
-            {page === "settleup" && (
-              <div className="pageGrid">
+              {page === "leaderboard" && (
                 <section className="prettyCard">
                   <div className="pageHeader">
-                    <h2>Settle Up</h2>
+                    <h2>Leaderboard</h2>
+                  </div>
+
+                  <div className="filterRow">
+                    {filters.map((f) => (
+                      <button
+                        key={f}
+                        className={`filterBtn ${leaderboardFilter === f ? "active" : ""}`}
+                        onClick={() => setLeaderboardFilter(f)}
+                      >
+                        {f}
+                      </button>
+                    ))}
                   </div>
 
                   <div className="tableWrap">
                     <table>
                       <thead>
                         <tr>
-                          <th>Player</th>
+                          <th>User</th>
                           <th>Net</th>
-                          <th className="settleCtaCell">Action</th>
                         </tr>
                       </thead>
                       <tbody>
-                        {outstanding.length ? (
-                          outstanding.map((row) => (
-                            <tr key={row.userId}>
-                              <td>{row.username}</td>
-                              <td className={row.net >= 0 ? "greenText" : "redText"}>
-                                {currency(row.net)}
-                              </td>
-                              <td className="settleCtaCell">
-                                <button
-                                  className="greenBtn settleInlineBtn"
-                                  onClick={() => settleAllWithUser(row.userId)}
-                                >
-                                  Settle All
-                                </button>
-                              </td>
-                            </tr>
-                          ))
-                        ) : (
+                        {leaderboard.length === 0 && (
                           <tr>
-                            <td colSpan="3" className="emptyCell">
-                              Nothing to settle right now.
+                            <td colSpan={2} className="emptyCell">
+                              No results.
                             </td>
                           </tr>
                         )}
+                        {leaderboard.map((row) => (
+                          <tr key={row.userId}>
+                            <td>{row.username}</td>
+                            <td className={row.net >= 0 ? "greenText" : "redText"}>
+                              {currency(row.net)}
+                            </td>
+                          </tr>
+                        ))}
                       </tbody>
                     </table>
                   </div>
                 </section>
-              </div>
-            )}
+              )}
 
-            {page === "history" && (
-              <div className="pageGrid">
+              {page === "history" && (
                 <section className="prettyCard">
                   <div className="pageHeader">
-                    <h2>Bet History</h2>
+                    <h2>History</h2>
                   </div>
 
                   <div className="filterRow">
-                    {filters.map((filter) => (
+                    {filters.map((f) => (
                       <button
-                        key={filter}
-                        className={historyFilter === filter ? "filterBtn active" : "filterBtn"}
-                        onClick={() => setHistoryFilter(filter)}
+                        key={f}
+                        className={`filterBtn ${historyFilter === f ? "active" : ""}`}
+                        onClick={() => setHistoryFilter(f)}
                       >
-                        {filter}
+                        {f}
                       </button>
                     ))}
                   </div>
@@ -4360,52 +4520,640 @@ export default function App() {
                       <table>
                         <thead>
                           <tr>
-                            <th>Player</th>
+                            <th>Opponent</th>
                             <th>Net</th>
                           </tr>
                         </thead>
                         <tbody>
-                          {headToHead.length ? (
-                            headToHead.map((row) => (
-                              <tr key={row.userId}>
-                                <td>{row.username}</td>
-                                <td className={row.net >= 0 ? "greenText" : "redText"}>
-                                  {currency(row.net)}
-                                </td>
-                              </tr>
-                            ))
-                          ) : (
+                          {headToHead.length === 0 && (
                             <tr>
-                              <td colSpan="2" className="emptyCell">
-                                No history for this filter yet.
+                              <td colSpan={2} className="emptyCell">
+                                No history.
                               </td>
                             </tr>
                           )}
+                          {headToHead.map((row) => (
+                            <tr key={row.userId}>
+                              <td>{row.username}</td>
+                              <td className={row.net >= 0 ? "greenText" : "redText"}>
+                                {currency(row.net)}
+                              </td>
+                            </tr>
+                          ))}
                         </tbody>
                       </table>
                     </div>
                   </div>
 
                   <div className="sectionBlock">
-                    <h3>Settled Bets</h3>
+                    <h3>Settled / Chopped Bets</h3>
                     <div className="scrollList">
                       {paidHistory.filter((bet) =>
                         isInFilter(bet.updatedAt || bet.createdAt, historyFilter)
-                      ).length ? (
-                        paidHistory
-                          .filter((bet) => isInFilter(bet.updatedAt || bet.createdAt, historyFilter))
-                          .map((bet) => renderBetCard(bet))
-                      ) : (
-                        <div className="emptyState">No settled bets in this filter.</div>
+                      ).length === 0 && (
+                        <div className="emptyState">No history yet.</div>
+                      )}
+                      {paidHistory
+                        .filter((bet) =>
+                          isInFilter(bet.updatedAt || bet.createdAt, historyFilter)
+                        )
+                        .map((bet) => renderBetCard(bet))}
+                    </div>
+                  </div>
+                </section>
+              )}
+
+              {page === "settle" && (
+                <section className="prettyCard">
+                  <div className="pageHeader">
+                    <h2>Settle Up</h2>
+                  </div>
+
+                  <div className="sectionBlock">
+                    <h3>Outstanding</h3>
+                    <div className="tableWrap">
+                      <table>
+                        <thead>
+                          <tr>
+                            <th>User</th>
+                            <th>Net</th>
+                            <th></th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {outstanding.length === 0 && (
+                            <tr>
+                              <td colSpan={3} className="emptyCell">
+                                All settled.
+                              </td>
+                            </tr>
+                          )}
+                          {outstanding.map((row) => (
+                            <tr key={row.userId}>
+                              <td>{row.username}</td>
+                              <td className={row.net >= 0 ? "greenText" : "redText"}>
+                                {currency(row.net)}
+                              </td>
+                              <td className="settleCtaCell">
+                                <button
+                                  className="greenBtn miniBtn settleInlineBtn"
+                                  onClick={() => settleAllWithUser(row.userId)}
+                                >
+                                  Settle All
+                                </button>
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+
+                  <div className="sectionBlock">
+                    <h3>Awaiting Payment</h3>
+                    <div className="scrollList">
+                      {unpaidGradedBets.length === 0 && (
+                        <div className="emptyState">None.</div>
+                      )}
+                      {unpaidGradedBets.map((bet) =>
+                        renderBetCard(bet, { showPayment: true })
                       )}
                     </div>
                   </div>
                 </section>
+              )}
+
+              {page === "account" && (
+                <section className="prettyCard">
+                  <div className="pageHeader">
+                    <h2>Account</h2>
+                  </div>
+
+                  <div className="fieldGroup">
+                    <label>Username</label>
+                    <input
+                      value={accountUsername}
+                      onChange={(e) => setAccountUsername(e.target.value)}
+                    />
+                  </div>
+
+                  <div className="twoCol">
+                    <div className="fieldGroup">
+                      <label>First Name</label>
+                      <input
+                        value={accountFirstName}
+                        onChange={(e) => setAccountFirstName(e.target.value)}
+                      />
+                    </div>
+                    <div className="fieldGroup">
+                      <label>Last Name</label>
+                      <input
+                        value={accountLastName}
+                        onChange={(e) => setAccountLastName(e.target.value)}
+                      />
+                    </div>
+                  </div>
+
+                  <div className="fieldGroup">
+                    <label>Email</label>
+                    <input
+                      value={accountEmail}
+                      onChange={(e) => setAccountEmail(e.target.value)}
+                    />
+                  </div>
+
+                  <div className="sectionBlock">
+                    <button
+                      className="greenBtn"
+                      onClick={handleSaveAccount}
+                      disabled={savingAccount}
+                    >
+                      Save
+                    </button>
+                  </div>
+
+                  {accountMessage && <div className="msgOk">{accountMessage}</div>}
+                  {accountError && <div className="msgErr">{accountError}</div>}
+                </section>
+              )}
+            </>
+          )}
+        </div>
+
+        {showCreateBetModal && (
+          <div className="modalBackdrop">
+            <div className="modal createBetModal">
+              <button
+                className="closeX"
+                onClick={() => {
+                  setShowCreateBetModal(false);
+                  resetCreateBetModal();
+                }}
+              >
+                ×
+              </button>
+
+              <h2 className="modalTitle">Create Bet</h2>
+
+              <div className="fieldGroup">
+                <label>Opponent</label>
+                <input
+                  placeholder="Search username"
+                  value={opponentSearch}
+                  onChange={(e) => {
+                    setOpponentSearch(e.target.value);
+                    setSelectedOpponentId("");
+                  }}
+                />
+                {opponentSearch.trim().length > 0 && filteredOpponentOptions.length > 0 && (
+                  <div className="autocompleteBox">
+                    {filteredOpponentOptions.map((u) => (
+                      <button
+                        key={u.id}
+                        className="autocompleteItem"
+                        onClick={() => {
+                          setSelectedOpponentId(u.id);
+                          setOpponentSearch(u.username);
+                        }}
+                      >
+                        {u.username}
+                      </button>
+                    ))}
+                  </div>
+                )}
               </div>
-            )}
+
+              <div className="fieldGroup">
+                <label>Mode</label>
+                <div className="radioRow">
+                  <button
+                    type="button"
+                    className={`radioBtn ${betMode === "classic" ? "active" : ""}`}
+                    onClick={() => setBetMode("classic")}
+                  >
+                    Classic
+                  </button>
+                  <button
+                    type="button"
+                    className={`radioBtn ${betMode === "custom" ? "active" : ""}`}
+                    onClick={() => setBetMode("custom")}
+                  >
+                    Custom
+                  </button>
+                </div>
+              </div>
+
+              {betMode === "custom" ? (
+                <div className="fieldGroup">
+                  <label>Details</label>
+                  <textarea
+                    value={customBetDetails}
+                    onChange={(e) => setCustomBetDetails(e.target.value)}
+                  />
+                </div>
+              ) : (
+                <>
+                  <div className="twoCol">
+                    <div className="fieldGroup">
+                      <label>Taking Team</label>
+                      <input
+                        value={takingTeam}
+                        onChange={(e) => setTakingTeam(e.target.value)}
+                      />
+                    </div>
+                    <div className="fieldGroup">
+                      <label>Against</label>
+                      <input
+                        value={againstTeam}
+                        onChange={(e) => setAgainstTeam(e.target.value)}
+                      />
+                    </div>
+                  </div>
+
+                  <div className="fieldGroup">
+                    <label>Market</label>
+                    <div className="radioRow">
+                      <button
+                        type="button"
+                        className={`radioBtn ${marketType === "side" ? "active" : ""}`}
+                        onClick={() => setMarketType("side")}
+                      >
+                        Side
+                      </button>
+                      <button
+                        type="button"
+                        className={`radioBtn ${marketType === "total" ? "active" : ""}`}
+                        onClick={() => setMarketType("total")}
+                      >
+                        Total
+                      </button>
+                    </div>
+                  </div>
+
+                  {marketType === "total" ? (
+                    <div className="twoCol">
+                      <div className="fieldGroup">
+                        <label>Pick</label>
+                        <div className="radioRow">
+                          <button
+                            type="button"
+                            className={`radioBtn ${totalPick === "over" ? "active" : ""}`}
+                            onClick={() => setTotalPick("over")}
+                          >
+                            Over
+                          </button>
+                          <button
+                            type="button"
+                            className={`radioBtn ${totalPick === "under" ? "active" : ""}`}
+                            onClick={() => setTotalPick("under")}
+                          >
+                            Under
+                          </button>
+                        </div>
+                      </div>
+                      <div className="fieldGroup">
+                        <label>Number</label>
+                        <input
+                          value={totalNumber}
+                          onChange={(e) => setTotalNumber(e.target.value)}
+                        />
+                      </div>
+                    </div>
+                  ) : (
+                    <>
+                      <div className="fieldGroup">
+                        <label>Pick</label>
+                        <div className="radioRow">
+                          <button
+                            type="button"
+                            className={`radioBtn ${sidePick === "ml" ? "active" : ""}`}
+                            onClick={() => setSidePick("ml")}
+                          >
+                            ML
+                          </button>
+                          <button
+                            type="button"
+                            className={`radioBtn ${sidePick === "plus" ? "active" : ""}`}
+                            onClick={() => setSidePick("plus")}
+                          >
+                            +
+                          </button>
+                          <button
+                            type="button"
+                            className={`radioBtn ${sidePick === "minus" ? "active" : ""}`}
+                            onClick={() => setSidePick("minus")}
+                          >
+                            -
+                          </button>
+                        </div>
+                      </div>
+
+                      {sidePick !== "ml" && (
+                        <div className="fieldGroup">
+                          <label>Spread</label>
+                          <input
+                            value={sideNumber}
+                            onChange={(e) => setSideNumber(e.target.value)}
+                          />
+                        </div>
+                      )}
+
+                      {sidePick === "ml" && (
+                        <div className="fieldGroup">
+                          <label>Odds</label>
+                          <input
+                            value={classicOdds}
+                            onChange={(e) => handleClassicOddsChange(e.target.value)}
+                            onBlur={handleClassicOddsBlur}
+                          />
+                        </div>
+                      )}
+                    </>
+                  )}
+                </>
+              )}
+
+              <div className="twoCol">
+                <div className="fieldGroup">
+                  <label>Bet</label>
+                  <div className="moneyInput">
+                    <span>$</span>
+                    <input
+                      value={betAmount}
+                      onChange={(e) => handleAmountChange(e.target.value)}
+                    />
+                  </div>
+                </div>
+
+                <div className="fieldGroup">
+                  <label>To Win</label>
+                  <div className="moneyInput">
+                    <span>$</span>
+                    <input value={winAmount} readOnly />
+                  </div>
+                </div>
+              </div>
+
+              <div className="sectionBlock">
+                <button className="greenBtn full" onClick={handleCreateBet}>
+                  Send Bet
+                </button>
+              </div>
+
+              {createBetError && <div className="errorText">{createBetError}</div>}
+            </div>
+          </div>
+        )}
+                {showBoardBetModal && (
+          <div className="modalBackdrop">
+            <div className="modal boardBetModal">
+              <button
+                className="closeX"
+                onClick={() => {
+                  setShowBoardBetModal(false);
+                  resetBoardBetModal();
+                }}
+              >
+                ×
+              </button>
+
+              <h2 className="modalTitle">Create Bet</h2>
+
+              <div className="boardSlipHeader">
+                <div className="boardSlipTeams">
+                  <TeamLogo src={boardTakingLogo} name={boardTakingTeam} />
+                  <span>{boardTakingTeam}</span>
+                  <span className="boardSlipVs">VS</span>
+                  <TeamLogo src={boardAgainstLogo} name={boardAgainstTeam} />
+                  <span>{boardAgainstTeam}</span>
+                </div>
+
+                <div className="boardSlipDetailGrid">
+                  <div className="boardSlipDetailCard">
+                    <div className="boardSlipDetailCardLabel">Taking</div>
+                    <div className="boardSlipDetailCardValue">
+                      {boardTakingTeam}
+                    </div>
+                  </div>
+
+                  <div className="boardSlipDetailCard">
+                    <div className="boardSlipDetailCardLabel">Against</div>
+                    <div className="boardSlipDetailCardValue">
+                      {boardAgainstTeam}
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <div className="fieldGroup">
+                <label>Opponent</label>
+                <input
+                  placeholder="Search username"
+                  value={boardOpponentSearch}
+                  onChange={(e) => {
+                    setBoardOpponentSearch(e.target.value);
+                    setBoardSelectedOpponentId("");
+                  }}
+                />
+                {boardOpponentSearch.trim().length > 0 &&
+                  filteredBoardOpponentOptions.length > 0 && (
+                    <div className="autocompleteBox">
+                      {filteredBoardOpponentOptions.map((u) => (
+                        <button
+                          key={u.id}
+                          className="autocompleteItem"
+                          onClick={() => {
+                            setBoardSelectedOpponentId(u.id);
+                            setBoardOpponentSearch(u.username);
+                          }}
+                        >
+                          {u.username}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+              </div>
+
+              {boardMarketType === "side" && boardSidePick === "ml" && (
+                <div className="boardSlipDetailGrid">
+                  <div className="boardSlipDetailCard">
+                    <div className="boardSlipDetailCardLabel">Odds</div>
+                    <div className="boardSlipDetailCardValue">ML</div>
+                  </div>
+
+                  <div className="boardSlipDetailCard">
+                    <div className="boardSlipDetailCardLabel">Odds</div>
+                    <div className="boardSlipDetailCardValue">{boardClassicOdds}</div>
+                  </div>
+                </div>
+              )}
+
+              {boardMarketType === "side" && boardSidePick !== "ml" && (
+                <div className="boardSlipDetailGrid">
+                  <div className="boardSlipDetailCard">
+                    <div className="boardSlipDetailCardLabel">Spread</div>
+                    <div className="boardSlipDetailCardValue">
+                      {formatSignedLine(boardSidePick, boardSideNumber)}
+                    </div>
+                  </div>
+
+                  <div className="boardSlipDetailCard">
+                    <div className="boardSlipDetailCardLabel">Odds</div>
+                    <div className="boardSlipDetailCardValue">+100</div>
+                  </div>
+                </div>
+              )}
+
+              {boardMarketType === "total" && (
+                <div className="boardSlipDetailGrid">
+                  <div className="boardSlipDetailCard">
+                    <div className="boardSlipDetailCardLabel">Total</div>
+                    <div className="boardSlipDetailCardValue">
+                      {(boardTotalPick === "over" ? "O " : "U ") + boardTotalNumber}
+                    </div>
+                  </div>
+
+                  <div className="boardSlipDetailCard">
+                    <div className="boardSlipDetailCardLabel">Odds</div>
+                    <div className="boardSlipDetailCardValue">+100</div>
+                  </div>
+                </div>
+              )}
+
+              <div className="twoCol">
+                <div className="fieldGroup">
+                  <label>Bet</label>
+                  <div className="moneyInput">
+                    <span>$</span>
+                    <input
+                      value={boardBetAmount}
+                      onChange={(e) => handleBoardAmountChange(e.target.value)}
+                    />
+                  </div>
+                </div>
+
+                <div className="fieldGroup">
+                  <label>To Win</label>
+                  <div className="moneyInput">
+                    <span>$</span>
+                    <input value={boardWinAmount} readOnly />
+                  </div>
+                </div>
+              </div>
+
+              <div className="sectionBlock">
+                <button className="greenBtn full" onClick={handleCreateBoardBet}>
+                  Propose Bet
+                </button>
+              </div>
+
+              {createBetError && <div className="errorText">{createBetError}</div>}
+            </div>
+          </div>
+        )}
+
+        {!session && !authLoading && (
+          <div className="modalBackdrop">
+            <div className="modal authModal">
+              <SettleUpLogo centered small />
+
+              <h1 className="modalTitle">
+                {authMode === "signup" ? "Create account" : "Sign In"}
+              </h1>
+
+              <p className="modalCopy">
+                Create an account or sign in to access SettleUp Bet Tracker.
+              </p>
+
+              <div className="authToggleRow">
+                <button
+                  className={authMode === "signup" ? "tabBtn active" : "tabBtn"}
+                  onClick={() => {
+                    setAuthMode("signup");
+                    setAuthError("");
+                  }}
+                >
+                  Create Account
+                </button>
+                <button
+                  className={authMode === "login" ? "tabBtn active" : "tabBtn"}
+                  onClick={() => {
+                    setAuthMode("login");
+                    setAuthError("");
+                  }}
+                >
+                  Sign In
+                </button>
+              </div>
+
+              {authMode === "signup" ? (
+                <>
+                  <div className="fieldGroup">
+                    <label>Username</label>
+                    <input
+                      value={signupUsername}
+                      onChange={(e) => setSignupUsername(e.target.value)}
+                      placeholder="Enter username"
+                    />
+                  </div>
+
+                  <div className="fieldGroup">
+                    <label>Email</label>
+                    <input
+                      value={signupEmail}
+                      onChange={(e) => setSignupEmail(e.target.value)}
+                      placeholder="Enter email"
+                    />
+                  </div>
+
+                  <div className="fieldGroup">
+                    <label>Password</label>
+                    <input
+                      type="password"
+                      value={signupPassword}
+                      onChange={(e) => setSignupPassword(e.target.value)}
+                      placeholder="Enter password"
+                    />
+                  </div>
+
+                  {authError && <div className="msgErr">{authError}</div>}
+
+                  <button className="greenBtn full" style={{ marginTop: 18 }} onClick={handleSignup}>
+                    Create Account
+                  </button>
+                </>
+              ) : (
+                <>
+                  <div className="fieldGroup">
+                    <label>Email</label>
+                    <input
+                      value={loginEmail}
+                      onChange={(e) => setLoginEmail(e.target.value)}
+                      placeholder="Enter email"
+                    />
+                  </div>
+
+                  <div className="fieldGroup">
+                    <label>Password</label>
+                    <input
+                      type="password"
+                      value={loginPassword}
+                      onChange={(e) => setLoginPassword(e.target.value)}
+                      placeholder="Enter password"
+                    />
+                  </div>
+
+                  {authError && <div className="msgErr">{authError}</div>}
+
+                  <button className="greenBtn full" style={{ marginTop: 18 }} onClick={handleLogin}>
+                    Sign In
+                  </button>
+                </>
+              )}
+            </div>
           </div>
         )}
       </div>
     </>
   );
-}    
+}
