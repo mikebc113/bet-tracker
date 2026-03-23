@@ -2741,39 +2741,74 @@ export default function App() {
           </div>
 
           <div className="betRight">
-            {options.showAcceptDecline ? (
-              <div className="inlineBtns">
-                <button className="greenBtn miniBtn" onClick={() => acceptBet(bet.id)}>
-                  Accept
-                </button>
-                <button className="ghostBtn miniBtn" onClick={() => declineBet(bet.id)}>
-                  Decline
-                </button>
-              </div>
-            ) : options.showGrade ? (
-              <div className="inlineBtns">
-                <button className="greenBtn miniBtn" onClick={() => gradeBet(bet.id, "win")}>
-                  Win
-                </button>
-                <button className="ghostBtn miniBtn" onClick={() => gradeBet(bet.id, "loss")}>
-                  Loss
-                </button>
-                <button className="ghostBtn miniBtn" onClick={() => gradeBet(bet.id, "chop")}>
-                  Chop
-                </button>
-              </div>
-            ) : options.showPayment ? (
-              <button className="greenBtn miniBtn" onClick={() => settleBet(bet.id)}>
-                {paymentText}
-              </button>
-            ) : options.showDelete ? (
-              <button className="ghostBtn miniBtn" onClick={() => deleteBet(bet.id)}>
-                Delete
-              </button>
-            ) : (
-              <div className="statusPill">{getBetDisplayStatus(bet)}</div>
-            )}
-          </div>
+  {options.showAcceptDecline ? (
+    <div className="inlineBtns">
+      <button className="greenBtn miniBtn" onClick={() => acceptBet(bet.id)}>
+        Accept
+      </button>
+      <button className="ghostBtn miniBtn" onClick={() => declineBet(bet.id)}>
+        Decline
+      </button>
+    </div>
+  ) : options.showGrade ? (
+    (() => {
+      const isProposer = bet.proposerId === currentUser.id;
+      const myGrade = isProposer ? bet.proposerGrade : bet.acceptorGrade;
+      const disableGradeCtas = !!myGrade;
+
+      return (
+        <div className="inlineBtns">
+          <button
+            className="greenBtn miniBtn"
+            onClick={() => gradeBet(bet.id, "win")}
+            disabled={disableGradeCtas}
+            style={
+              disableGradeCtas
+                ? { opacity: 0.45, cursor: "not-allowed", filter: "grayscale(0.35)" }
+                : undefined
+            }
+          >
+            Win
+          </button>
+          <button
+            className="ghostBtn miniBtn"
+            onClick={() => gradeBet(bet.id, "loss")}
+            disabled={disableGradeCtas}
+            style={
+              disableGradeCtas
+                ? { opacity: 0.45, cursor: "not-allowed", filter: "grayscale(0.35)" }
+                : undefined
+            }
+          >
+            Loss
+          </button>
+          <button
+            className="ghostBtn miniBtn"
+            onClick={() => gradeBet(bet.id, "chop")}
+            disabled={disableGradeCtas}
+            style={
+              disableGradeCtas
+                ? { opacity: 0.45, cursor: "not-allowed", filter: "grayscale(0.35)" }
+                : undefined
+            }
+          >
+            Chop
+          </button>
+        </div>
+      );
+    })()
+  ) : options.showPayment ? (
+    <button className="greenBtn miniBtn" onClick={() => settleBet(bet.id)}>
+      {paymentText}
+    </button>
+  ) : options.showDelete ? (
+    <button className="ghostBtn miniBtn" onClick={() => deleteBet(bet.id)}>
+      Delete
+    </button>
+  ) : (
+    <div className="statusPill">{getBetDisplayStatus(bet)}</div>
+  )}
+</div>
         </div>
 
         <div className="betRowBottom">
