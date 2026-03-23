@@ -1030,7 +1030,8 @@ function extractBoardItems(data) {
   return Array.isArray(firstArrayValue) ? firstArrayValue : [];
 }
 
-function normalizeBoardGames(items) {
+function normalizeBoardGames(items, options = {}) {
+  const { includeStarted = false } = options;
   const basketballItems = items.filter((item) => isBasketballItem(item));
   const grouped = new Map();
 
@@ -1154,6 +1155,7 @@ function normalizeBoardGames(items) {
 
   return Array.from(grouped.values())
     .filter((game) => {
+      if (includeStarted) return true;
       if (!game.commenceTime) return true;
       const startTime = new Date(game.commenceTime).getTime();
       if (Number.isNaN(startTime)) return true;
@@ -1288,6 +1290,7 @@ export default function App() {
   const [savingAccount, setSavingAccount] = useState(false);
 
   const [todayBoard, setTodayBoard] = useState([]);
+  const [allTodayGames, setAllTodayGames] = useState([]);
   const [todayBoardLoading, setTodayBoardLoading] = useState(false);
   const [todayBoardError, setTodayBoardError] = useState("");
   const [visibleBoardCount, setVisibleBoardCount] = useState(BOARD_PAGE_SIZE);
@@ -1515,7 +1518,11 @@ export default function App() {
     const cached = readTodayBoardCache();
 
     if (cached?.date === todayKey && Array.isArray(cached.items) && cached.items.length) {
-      setTodayBoard(normalizeBoardGames(cached.items));
+      const allGames = normalizeBoardGames(cached.items, { includeStarted: true });
+      const boardGames = normalizeBoardGames(cached.items, { includeStarted: false });
+
+      setAllTodayGames(allGames);
+      setTodayBoard(boardGames);
       setVisibleBoardCount(BOARD_PAGE_SIZE);
     }
 
@@ -1538,18 +1545,25 @@ export default function App() {
 
         const data = await response.json();
         const items = extractBoardItems(data);
-        const normalized = normalizeBoardGames(items);
+        const allGames = normalizeBoardGames(items, { includeStarted: true });
+        const boardGames = normalizeBoardGames(items, { includeStarted: false });
 
         if (!cancelled) {
-          if (normalized.length) {
-            setTodayBoard(normalized);
+          if (allGames.length) {
+            setAllTodayGames(allGames);
+            setTodayBoard(boardGames);
             setVisibleBoardCount(BOARD_PAGE_SIZE);
             writeTodayBoardCache(todayKey, items);
             setTodayBoardError("");
           } else if (cached?.items?.length) {
-            setTodayBoard(normalizeBoardGames(cached.items));
+            const cachedAllGames = normalizeBoardGames(cached.items, { includeStarted: true });
+            const cachedBoardGames = normalizeBoardGames(cached.items, { includeStarted: false });
+
+            setAllTodayGames(cachedAllGames);
+            setTodayBoard(cachedBoardGames);
             setTodayBoardError("");
           } else {
+            setAllTodayGames([]);
             setTodayBoard([]);
             setTodayBoardError("Could not load today's board.");
           }
@@ -1557,9 +1571,14 @@ export default function App() {
       } catch {
         if (!cancelled) {
           if (cached?.items?.length) {
-            setTodayBoard(normalizeBoardGames(cached.items));
+            const cachedAllGames = normalizeBoardGames(cached.items, { includeStarted: true });
+            const cachedBoardGames = normalizeBoardGames(cached.items, { includeStarted: false });
+
+            setAllTodayGames(cachedAllGames);
+            setTodayBoard(cachedBoardGames);
             setTodayBoardError("");
           } else {
+            setAllTodayGames([]);
             setTodayBoard([]);
             setTodayBoardError("Could not load today's board.");
           }
@@ -1682,7 +1701,7 @@ export default function App() {
     if (!orphanIds.length) return;
 
     await supabase.from("bets").delete().in("id", orphanIds);
-    setBets((prev) => prev.filter((b) => !(!b || b.id === orphanIds)));
+    setBets((prev) => prev.filter((b) => !orphanIds.includes(b.id)));
   }
 
   useEffect(() => {
@@ -1700,6 +1719,25 @@ export default function App() {
     }
 
     boot();
+  }, [authUser]);
+
+  useEffect(() => {
+    if (!authUser) return;
+
+    const channel = supabase
+      .channel("bets-realtime")
+      .on(
+        "postgres_changes",
+        { event: "*", schema: "public", table: "bets" },
+        async () => {
+          await loadBets();
+        }
+      )
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(channel);
+    };
   }, [authUser]);
 
   useEffect(() => {
@@ -2268,18 +2306,19 @@ export default function App() {
     if (!currentUser) return;
 
     const selectedBet = bets.find((b) => b.id === betId);
-    if (!selectedBet) return;
+    if (!selectedBet || selectedBet.status !== "accepted") return;
 
-    const warning = gradeWarnings[betId];
     const isProposer = selectedBet.proposerId === currentUser.id;
-    const myExisting = isProposer ? selectedBet.proposerGrade : selectedBet.acceptorGrade;
-    const otherGrade = isProposer ? selectedBet.acceptorGrade : selectedBet.proposerGrade;
+    const otherGrade = isProposer
+      ? selectedBet.acceptorGrade
+      : selectedBet.proposerGrade;
 
     const nextProposerGrade = isProposer ? result : selectedBet.proposerGrade;
     const nextAcceptorGrade = isProposer ? selectedBet.acceptorGrade : result;
 
+    const updatedAt = getNow();
+
     if (!otherGrade) {
-      const updatedAt = getNow();
       const error = await updateBetRow(betId, {
         proposerGrade: nextProposerGrade,
         acceptorGrade: nextAcceptorGrade,
@@ -2308,89 +2347,11 @@ export default function App() {
         delete copy[betId];
         return copy;
       });
+
       return;
     }
 
-    if (isConflictPair(result, otherGrade) && !warning) {
-      setGradeWarnings((prev) => ({ ...prev, [betId]: result }));
-      return;
-    }
-
-    if (warning && result !== warning) {
-      const updatedAt = getNow();
-      const resetProposerGrade = isProposer ? result : null;
-      const resetAcceptorGrade = isProposer ? null : result;
-
-      const error = await updateBetRow(betId, {
-        proposerGrade: resetProposerGrade,
-        acceptorGrade: resetAcceptorGrade,
-        status: "accepted",
-        updatedAt,
-      });
-
-      if (error) return;
-
-      setBets((prev) =>
-        prev.map((b) =>
-          b.id === betId
-            ? {
-                ...b,
-                proposerGrade: resetProposerGrade,
-                acceptorGrade: resetAcceptorGrade,
-                status: "accepted",
-                updatedAt,
-              }
-            : b
-        )
-      );
-
-      setGradeWarnings((prev) => {
-        const copy = { ...prev };
-        delete copy[betId];
-        return copy;
-      });
-      return;
-    }
-
-    if (warning && result === warning) {
-      const updatedAt = getNow();
-      const finalStatus = isValidFinalPair(nextProposerGrade, nextAcceptorGrade)
-        ? "graded"
-        : "accepted";
-
-      const error = await updateBetRow(betId, {
-        proposerGrade: nextProposerGrade,
-        acceptorGrade: nextAcceptorGrade,
-        status: finalStatus,
-        updatedAt,
-      });
-
-      if (error) return;
-
-      setBets((prev) =>
-        prev.map((b) =>
-          b.id === betId
-            ? {
-                ...b,
-                proposerGrade: nextProposerGrade,
-                acceptorGrade: nextAcceptorGrade,
-                status: finalStatus,
-                updatedAt,
-              }
-            : b
-        )
-      );
-
-      setGradeWarnings((prev) => {
-        const copy = { ...prev };
-        delete copy[betId];
-        return copy;
-      });
-      return;
-    }
-
-    if (myExisting && otherGrade && isValidFinalPair(nextProposerGrade, nextAcceptorGrade)) {
-      const updatedAt = getNow();
+    if (isValidFinalPair(nextProposerGrade, nextAcceptorGrade)) {
       const error = await updateBetRow(betId, {
         proposerGrade: nextProposerGrade,
         acceptorGrade: nextAcceptorGrade,
@@ -2419,22 +2380,49 @@ export default function App() {
         delete copy[betId];
         return copy;
       });
+
+      return;
     }
+
+    const error = await updateBetRow(betId, {
+      proposerGrade: nextProposerGrade,
+      acceptorGrade: nextAcceptorGrade,
+      status: "accepted",
+      updatedAt,
+    });
+
+    if (error) return;
+
+    setBets((prev) =>
+      prev.map((b) =>
+        b.id === betId
+          ? {
+              ...b,
+              proposerGrade: nextProposerGrade,
+              acceptorGrade: nextAcceptorGrade,
+              status: "accepted",
+              updatedAt,
+            }
+          : b
+      )
+    );
+
+    setGradeWarnings((prev) => ({ ...prev, [betId]: true }));
   }
 
   async function autoFinalizeCompletedGames() {
-    if (!todayBoard.length) return;
+    if (!allTodayGames.length) return;
 
     const candidates = bets.filter((bet) => {
       if (bet.status !== "accepted") return false;
       if (!bet.betPayload || bet.betPayload.kind !== "classic") return false;
 
-      const game = findGameForBet(bet.betPayload, todayBoard);
+      const game = findGameForBet(bet.betPayload, allTodayGames);
       return game?.isFinal;
     });
 
     for (const bet of candidates) {
-      const game = findGameForBet(bet.betPayload, todayBoard);
+      const game = findGameForBet(bet.betPayload, allTodayGames);
       if (!game) continue;
 
       const homeScore = Number(game.homeScore);
@@ -2465,7 +2453,8 @@ export default function App() {
           const spreadValue = Number(payload.sideNumber);
           if (!Number.isFinite(spreadValue)) continue;
 
-          const signedSpread = payload.sidePick === "minus" ? -spreadValue : spreadValue;
+          const signedSpread =
+            payload.sidePick === "minus" ? -spreadValue : spreadValue;
           const adjusted = proposerScore + signedSpread;
 
           if (adjusted === opponentScore) {
@@ -2527,7 +2516,7 @@ export default function App() {
 
   useEffect(() => {
     autoFinalizeCompletedGames();
-  }, [todayBoard]);
+  }, [allTodayGames, bets]);
 
   async function settleBet(betId) {
     const updatedAt = getNow();
@@ -2676,7 +2665,7 @@ export default function App() {
   function renderGradeWarning(betId) {
     return gradeWarnings[betId] ? (
       <div className="errorText compactError strongMessage">
-        Opponent picked something different. Tap the same result again to confirm, or choose a different result to reset.
+        Opponent picked something different. Pick a matching opposite result, or both choose chop for a chop.
       </div>
     ) : null;
   }
@@ -2731,7 +2720,7 @@ export default function App() {
     const paymentText = iAmWinner ? "Got Paid!" : "Paid Up!";
     const headline = getBetHeadlineForViewer(bet, currentUser.id);
     const subline = getBetSublineForViewer(bet, currentUser.id, users);
-    const gameDisplay = getBetGameDisplay(bet, currentUser.id, todayBoard);
+    const gameDisplay = getBetGameDisplay(bet, currentUser.id, allTodayGames);
 
     return (
       <div key={bet.id} className="betCard">
@@ -3021,7 +3010,6 @@ export default function App() {
           color: transparent;
           text-shadow: 0 0 20px rgba(70,215,255,0.14);
         }
-
         .logoWrap.small .logoTitle {
           font-size: 34px;
         }
@@ -3850,6 +3838,7 @@ export default function App() {
             0 0 0 1px rgba(70,215,255,0.20),
             0 0 20px rgba(70,215,255,0.12);
         }
+
         .boardHeaderRow {
           display: grid;
           grid-template-columns: minmax(0, 1fr) 300px;
@@ -5147,4 +5136,4 @@ export default function App() {
       </div>
     </>
   );
-}              
+}          
